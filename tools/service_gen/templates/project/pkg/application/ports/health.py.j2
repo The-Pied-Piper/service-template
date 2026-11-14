@@ -1,0 +1,31 @@
+"""Readiness probes and the health report.
+
+Each readiness probe covers one external dependency the service cannot work without.
+
+`main.py` hands the probes to the health-check service; `adapters/outbound/db/health.py`
+is the one for Postgres. Add more (caches, downstream APIs) the same way.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+
+@dataclass(frozen=True)
+class Health:
+    """The outcome of a liveness or readiness check."""
+
+    status: str
+
+
+class NotReadyError(Exception):
+    """A dependency is unavailable. The inbound adapter translates this into a response."""
+
+
+class ReadinessProbe(Protocol):
+    name: str
+
+    async def check(self) -> None:
+        """Return when the dependency is reachable; raise NotReadyError otherwise."""
+        ...
