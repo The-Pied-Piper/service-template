@@ -12,5 +12,6 @@ First public release.
 - Vendored generator that owns only `app/generated/`; `./dev.sh sync` regenerates it.
 - `./dev.sh upgrade [ref]` pulls newer template-owned files into an existing service.
 - Layer rules enforced by import-linter, with a test that plants a violation for each rule.
+- Runs on Python 3.15 (`python:3.15-slim` base image); the pinned requirements are still compiled for Python 3.12.
 
 Manual steps: none (first release).
