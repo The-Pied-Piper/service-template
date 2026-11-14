@@ -60,7 +60,7 @@ connexion==3.3.0
     # via
     #   -c requirements.txt
     #   -r requirements.in
-datamodel-code-generator==0.91.0
+datamodel-code-generator==0.92.0
     # via
     #   -c tools/service_gen/requirements.txt
     #   -r tools/service_gen/requirements.in
