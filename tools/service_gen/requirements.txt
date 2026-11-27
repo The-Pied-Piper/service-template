@@ -12,7 +12,7 @@ click==8.5.1
     # via
     #   -c requirements.txt
     #   black
-datamodel-code-generator==0.92.0
+datamodel-code-generator==0.101.0
     # via -r tools/service_gen/requirements.in
 genson==1.4.0
     # via datamodel-code-generator
