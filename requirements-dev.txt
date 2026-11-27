@@ -204,7 +204,7 @@ swagger-ui-bundle==1.1.0
     # via connexion
 typeguard==4.6.0
     # via inflect
-types-pyyaml==6.0.12.20261103
+types-pyyaml==6.0.12.20261122
     # via -r requirements-dev.in
 typing-extensions==4.16.0
     # via
