@@ -10,8 +10,8 @@ behind them.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Iterable
-from datetime import timedelta
 
 from {{ package }}.application.ports.clock import Clock
 from {{ package }}.application.ports.job_runner import JobResult, JobStatus, RunReport
@@ -24,10 +24,6 @@ logger = logging.getLogger(__name__)
 # Error text is kept for whoever looks at the job later, cut to a fixed length.
 _MAX_ERROR_LENGTH = 2000
 
-# A run that started this long ago and never finished is taken as crashed, so its lock is ignored.
-# A job that really runs longer than this will be started again by a later tick: keep jobs shorter.
-DEFAULT_STALE_AFTER = timedelta(hours=1)
-
 
 class DuplicateJobError(ValueError):
     """Two jobs were given the same name. A mistake in the composition root, not a business rule."""
@@ -39,31 +35,34 @@ class DueJobRunner:
         jobs: Iterable[ScheduledJob],
         store: JobRunStore,
         clock: Clock,
-        stale_after: timedelta = DEFAULT_STALE_AFTER,
     ) -> None:
         self._jobs = tuple(jobs)
-        names = [job.name for job in self._jobs]
-        for name in sorted({name for name in names if names.count(name) > 1}):
-            raise DuplicateJobError(f"more than one scheduled job is named {name!r}")
+        counts = Counter(job.name for job in self._jobs)
+        duplicates = sorted(name for name, count in counts.items() if count > 1)
+        if duplicates:
+            raise DuplicateJobError(f"more than one scheduled job is named {duplicates[0]!r}")
         self._store = store
         self._clock = clock
-        self._stale_after = stale_after
 
     async def run_due_jobs(self) -> RunReport:
         return RunReport(tuple([await self._run_one(job) for job in self._jobs]))
 
     async def _run_one(self, job: ScheduledJob) -> JobResult:
-        now = self._clock.now()
-        record = await self._store.get(job.name)
-        seen = record.last_started_at if record else None
-        if not is_due(job.schedule, seen, now):
-            return JobResult(job.name, JobStatus.NOT_DUE)
-        claimed = await self._store.claim(
-            job.name,
-            seen_last_started_at=seen,
-            now=now,
-            locked_since_before=now - self._stale_after,
-        )
+        try:
+            now = self._clock.now()
+            record = await self._store.get(job.name)
+            seen = record.last_started_at if record else None
+            if not is_due(job.schedule, seen, now):
+                return JobResult(job.name, JobStatus.NOT_DUE)
+            claimed = await self._store.claim(
+                job.name,
+                seen_last_started_at=seen,
+                now=now,
+                locked_since_before=now - job.stale_after,
+            )
+        except Exception as exc:  # the store is down: report this job, the others may still work
+            logger.exception("could not start scheduled job %s", job.name)
+            return JobResult(job.name, JobStatus.FAILED, _describe(exc))
         if not claimed:
             return JobResult(job.name, JobStatus.CLAIMED_ELSEWHERE)
 
@@ -72,7 +71,7 @@ class DueJobRunner:
             await job.task.run()
         except Exception as exc:  # one job failing must not stop the others
             logger.exception("scheduled job %s failed", job.name)
-            error = f"{type(exc).__name__}: {exc}"[:_MAX_ERROR_LENGTH]
+            error = _describe(exc)
         try:
             await self._store.finish(
                 job.name, started_at=now, finished_at=self._clock.now(), error=error
@@ -80,3 +79,7 @@ class DueJobRunner:
         except Exception:  # the lock goes stale by itself; the other jobs still run
             logger.exception("could not record the end of scheduled job %s", job.name)
         return JobResult(job.name, JobStatus.FAILED if error else JobStatus.RAN, error)
+
+
+def _describe(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"[:_MAX_ERROR_LENGTH]

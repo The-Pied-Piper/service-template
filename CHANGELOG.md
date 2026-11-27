@@ -7,7 +7,7 @@ is listed under "Manual steps".
 
 - Scheduled jobs: tasks (use cases with `run()`) are paired with a name and cron schedule in
   `app/scheduled_jobs.py`; a runner in `application/scheduling`, a `run-due-jobs` command that
-  runs what is due and records each run in a `job_runs` table, and a Lambda handler for the same.
+  runs what is due and records the last run of each job in a `job_runs` table, and a Lambda handler for the same.
   The trigger is left to infrastructure. See "Scheduled jobs" in the README.
 - `python -m app serve | run-due-jobs`; `./dev.sh run-due-jobs`.
 - Two composition roots (`app/main.py`, `app/worker.py`) share `app/wiring.py`.
@@ -22,7 +22,8 @@ copy the new files `./dev.sh init` writes (in a scratch checkout) into `app/` an
 revision; point `app/main.py` at `build_wiring` as the new template's `main.py` does (its
 `build_adapters` now takes the wiring instead of the engine); update the `layers`,
 `core-framework-free`, `adapters-depend-on-ports-only`, `application-sublayers` and
-`main-wires-concretes-only` contracts and add `worker-is-web-free` and
+`main-wires-concretes-only` contracts and add `worker-is-web-free`,
+`wiring-builds-no-inbound-adapters`, `server-has-no-job-runner`, `command-line-is-web-free` and
 `services-see-the-task-contract-only` in `pyproject.toml`; and replace the `prod` section of your Dockerfile as in the template's.
 If your `prod` stage adds the Lambda Web Adapter, keep that in `prod` only; anything else you added
 to `prod` that the job runner needs too (system packages, `ENV`) moves up to `runtime`. Add

@@ -7,9 +7,14 @@ composition root pairs it with a name and a `Schedule` in a `ScheduledJob`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Protocol
 
 from {{ package }}.domain.schedule import Schedule
+
+# A run that started this long ago and never finished is taken as crashed (a killed process never
+# marks its end), so its lock is ignored and the job can start again.
+DEFAULT_STALE_AFTER = timedelta(hours=1)
 
 
 class ScheduledTask(Protocol):
@@ -20,8 +25,21 @@ class ScheduledTask(Protocol):
 
 @dataclass(frozen=True)
 class ScheduledJob:
-    """`name` is the key of the job's row in `job_runs`: renaming it starts a new history."""
+    """`name` is the key of the job's row in `job_runs`, which keeps the job's last run: renaming
+    it starts a new row.
+
+    `stale_after` is how long a run may go on before it is taken as crashed. Set it a little above
+    the longest the task really takes: a task that outlives it is started again by a later tick,
+    and a crashed run blocks the job until it passes.
+    """
 
     name: str
     schedule: Schedule
     task: ScheduledTask
+    stale_after: timedelta = DEFAULT_STALE_AFTER
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("a scheduled job needs a name")
+        if self.stale_after <= timedelta(0):
+            raise ValueError(f"{self.name!r}: stale_after must be positive")

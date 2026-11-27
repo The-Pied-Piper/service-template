@@ -314,6 +314,13 @@ WORKER_FORBIDDEN = (
     "connexion fastapi starlette uvicorn app.generated.handlers app.main "
     "app.adapters.inbound.http_errors"
 ).split()
+SERVER_FORBIDDEN = (
+    "app.worker app.scheduled_jobs app.application.scheduling.due_job_runner "
+    "app.adapters.inbound.jobs_cli app.adapters.inbound.jobs_lambda"
+).split()
+CLI_FORBIDDEN = (
+    "connexion fastapi starlette app.generated.handlers app.main app.adapters.inbound.http_errors"
+).split()
 SERVICES = "app.application.services.status_service"
 SCHEDULING = "import app.application.scheduling.task"
 
@@ -374,6 +381,9 @@ PLANTED_VIOLATIONS = [
     *[("worker-is-web-free", "app/worker.py", f"import {m}") for m in WORKER_FORBIDDEN],
     ("worker-is-web-free", "app/wiring.py", "import connexion"),
     ("worker-is-web-free", "app/scheduled_jobs.py", "import connexion"),
+    # The server never loads the job runner; the command line never loads the web stack.
+    *[("server-has-no-job-runner", "app/main.py", f"import {m}") for m in SERVER_FORBIDDEN],
+    *[("command-line-is-web-free", "app/__main__.py", f"import {m}") for m in CLI_FORBIDDEN],
     ("wiring-builds-no-inbound-adapters", "app/wiring.py", "import app.adapters.inbound.jobs_cli"),
     *[("main-wires-concretes-only", "app/__main__.py", f"import {m}") for m in MAIN_FORBIDDEN],
     ("layers", "app/wiring.py", "import app.__main__"),

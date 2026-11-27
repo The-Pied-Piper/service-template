@@ -9,7 +9,7 @@ import pytest
 from {{ package }}.adapters.inbound.cron import CronSyntaxError, parse_cron
 from {{ package }}.application.ports.job_runner import JobStatus
 from {{ package }}.application.scheduling.due_job_runner import DueJobRunner, DuplicateJobError
-from {{ package }}.application.scheduling.task import ScheduledJob
+from {{ package }}.application.scheduling.task import DEFAULT_STALE_AFTER, ScheduledJob
 from {{ package }}.domain.job_run import JobRun
 
 
@@ -77,8 +77,8 @@ class Failing:
         raise RuntimeError(self._message)
 
 
-def job(name: str, schedule: str, task: object) -> ScheduledJob:
-    return ScheduledJob(name, parse_cron(schedule), task)  # type: ignore[arg-type]
+def job(name: str, schedule: str, task: object, **options: timedelta) -> ScheduledJob:
+    return ScheduledJob(name, parse_cron(schedule), task, **options)  # type: ignore[arg-type]
 
 
 def build(*jobs: tuple[str, str, Counter]) -> tuple[DueJobRunner, FakeStore, FakeClock]:
@@ -232,6 +232,54 @@ async def test_a_lock_older_than_the_stale_limit_is_ignored() -> None:
     assert report.results[0].status is JobStatus.RAN
 
 
+async def test_each_job_has_its_own_stale_limit() -> None:
+    quick, slow = Counter(), Counter()
+    store, clock = FakeStore(), FakeClock(MIDNIGHT)
+    runner = DueJobRunner(
+        [
+            job("quick", "*/5 * * * *", quick, stale_after=timedelta(minutes=10)),
+            job("slow", "*/5 * * * *", slow),
+        ],
+        store,
+        clock,
+    )
+    for name in ("quick", "slow"):  # both last started 20 minutes ago and never finished
+        store.runs[name] = JobRun(
+            name, MIDNIGHT - timedelta(minutes=20), None, MIDNIGHT - timedelta(minutes=20)
+        )
+
+    report = await runner.run_due_jobs()
+
+    assert {r.name: r.status for r in report.results} == {
+        "quick": JobStatus.RAN,
+        "slow": JobStatus.CLAIMED_ELSEWHERE,
+    }
+    assert DEFAULT_STALE_AFTER > timedelta(minutes=20)
+
+
+async def test_a_store_failure_when_reading_is_reported_and_the_others_still_run() -> None:
+    class ReadFails(FakeStore):
+        async def get(self, name: str) -> JobRun | None:
+            if name == "first":
+                raise ConnectionError("database went away")
+            return await super().get(name)
+
+    after = Counter()
+    runner = DueJobRunner(
+        [job("first", "0 0 * * *", Counter()), job("second", "0 0 * * *", after)],
+        ReadFails(),
+        FakeClock(MIDNIGHT),
+    )
+
+    report = await runner.run_due_jobs()
+
+    assert report.failed
+    assert report.results[0].status is JobStatus.FAILED
+    assert report.results[0].error == "ConnectionError: database went away"
+    assert report.results[1].status is JobStatus.RAN
+    assert after.calls == 1
+
+
 async def test_two_runners_over_one_store_run_the_job_once() -> None:
     task = Counter()
     store, clock = FakeStore(), FakeClock(MIDNIGHT)
@@ -269,6 +317,13 @@ def test_two_jobs_with_one_name_are_refused() -> None:
         )
 
 
+def test_a_job_needs_a_name_and_a_positive_stale_limit() -> None:
+    with pytest.raises(ValueError, match="needs a name"):
+        job(" ", "0 0 * * *", Counter())
+    with pytest.raises(ValueError, match="stale_after"):
+        job("purge", "0 0 * * *", Counter(), stale_after=timedelta(0))
+
+
 def test_the_runner_keeps_the_list_it_was_given() -> None:
     jobs = [job("purge", "0 0 * * *", Counter())]
     runner = DueJobRunner(jobs, FakeStore(), FakeClock(MIDNIGHT))
@@ -284,31 +339,31 @@ def test_text_that_is_not_cron_fails_when_the_job_is_built() -> None:
         parse_cron("every day")
 
 
-class PurgePort(Protocol):
-    async def purge_old(self) -> None: ...
+class MessagesPort(Protocol):
+    async def delete_older_than_months(self, months: int) -> None: ...
 
 
 class PurgeOldMessages:
-    """The shape of a task: a use case with run(), knowing nothing of being scheduled. It calls
-    the port its service implements."""
+    """The shape of a task: a use case with run(), knowing nothing of being scheduled. It works
+    through a port, which an outbound adapter implements."""
 
-    def __init__(self, service: PurgePort) -> None:
-        self._service = service
+    def __init__(self, messages: MessagesPort) -> None:
+        self._messages = messages
 
     async def run(self) -> None:
-        await self._service.purge_old()
+        await self._messages.delete_older_than_months(12)
 
 
 async def test_a_use_case_runs_as_a_task_through_the_runner() -> None:
-    class PurgeService:
-        purged = 0
+    class Messages:
+        deleted: list[int] = []
 
-        async def purge_old(self) -> None:
-            self.purged += 1
+        async def delete_older_than_months(self, months: int) -> None:
+            self.deleted.append(months)
 
-    service = PurgeService()
+    messages = Messages()
     runner = DueJobRunner(
-        [job("purge-old-messages", "0 0 * * *", PurgeOldMessages(service))],
+        [job("purge-old-messages", "0 0 * * *", PurgeOldMessages(messages))],
         FakeStore(),
         FakeClock(MIDNIGHT),
     )
@@ -316,4 +371,4 @@ async def test_a_use_case_runs_as_a_task_through_the_runner() -> None:
     report = await runner.run_due_jobs()
 
     assert [(r.name, r.status) for r in report.results] == [("purge-old-messages", JobStatus.RAN)]
-    assert service.purged == 1
+    assert messages.deleted == [12]

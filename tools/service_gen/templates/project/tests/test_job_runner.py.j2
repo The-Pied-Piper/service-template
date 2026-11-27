@@ -1,6 +1,5 @@
 """The job runner's entry points: the command, the Lambda handler and `python -m app`."""
 
-import asyncio
 import io
 import subprocess
 import sys
@@ -8,12 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from {{ package }} import worker
 from {{ package }}.adapters.inbound.jobs_cli import run_due_jobs_command
 from {{ package }}.adapters.inbound.jobs_lambda import JobsFailedError, run_due_jobs_event
-from {{ package }}.adapters.outbound.db import Base, create_engine
 from {{ package }}.application.ports.job_runner import JobResult, JobStatus, RunReport
-from {{ package }}.settings import Settings
-from {{ package }}.worker import handler
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -60,39 +57,22 @@ async def test_the_lambda_event_fails_the_invocation_when_a_job_failed() -> None
         await run_due_jobs_event(FakeRunner(OK, BROKEN))
 
 
-async def _prepare_database() -> bool:
-    """Make sure the table exists; False when no database is reachable."""
-    engine = create_engine(Settings())
-    try:
-        async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
-        return True
-    except OSError:
-        return False
-    finally:
-        await engine.dispose()
+@pytest.fixture
+def no_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the entry points with an empty job list: the service's real jobs must never run, or
+    even touch the database, from a test."""
+    monkeypatch.setattr(worker, "build_scheduled_jobs", lambda settings, wiring: ())
 
 
-def test_the_command_line_runs_with_no_jobs_scheduled() -> None:
-    if not asyncio.run(_prepare_database()):
-        pytest.skip("no database reachable")
-
-    result = subprocess.run(
-        [sys.executable, "-m", "{{ package }}", "run-due-jobs"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
+def test_the_command_runs_through_the_root(
+    no_jobs: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert worker.run_due_jobs() == 0
+    assert capsys.readouterr().out == ""
 
 
-def test_the_lambda_handler_runs_with_no_jobs_scheduled() -> None:
-    if not asyncio.run(_prepare_database()):
-        pytest.skip("no database reachable")
-
-    assert handler({}, None) == {"results": []}
+def test_the_lambda_handler_runs_through_the_root(no_jobs: None) -> None:
+    assert worker.handler({}, None) == {"results": []}
 
 
 def test_the_job_runner_command_does_not_load_the_web_application() -> None:

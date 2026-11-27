@@ -6,11 +6,10 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, text
+from sqlalchemy import delete, inspect, text
 
 from {{ package }}.adapters.inbound.cron import parse_cron
 from {{ package }}.adapters.outbound.db import (
-    Base,
     JobRunRow,
     SqlJobRunStore,
     create_engine,
@@ -29,16 +28,23 @@ LONG_AGO = NOW - timedelta(hours=1)
 @pytest.fixture
 async def store() -> AsyncIterator[SqlJobRunStore]:
     engine = create_engine(Settings())
+    table = JobRunRow.metadata.tables[JobRunRow.__tablename__]
     try:
         async with engine.begin() as connection:
             await connection.execute(text("SELECT 1"))
-            await connection.run_sync(Base.metadata.create_all)
+            # The table comes from the migration. Create it here only when it is missing, and
+            # drop it afterwards only then, so a later `alembic upgrade head` still works.
+            existed = await connection.run_sync(lambda sync: inspect(sync).has_table(table.name))
+            if not existed:
+                await connection.run_sync(table.create)
     except OSError:
         await engine.dispose()
         pytest.skip("no database reachable")
     yield SqlJobRunStore(create_session_factory(engine))
     async with engine.begin() as connection:
         await connection.execute(delete(JobRunRow).where(JobRunRow.name.like("test-%")))
+        if not existed:
+            await connection.run_sync(table.drop)
     await engine.dispose()
 
 

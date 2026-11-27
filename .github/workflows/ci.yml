@@ -77,13 +77,23 @@ jobs:
           cache-from: type=gha,scope=prod
           cache-to: type=gha,scope=prod,mode=max
 
-      # jobs-lambda builds on jobs, so this builds both.
       - name: Build job runner image
         if: hashFiles('app/worker.py') != ''
         uses: docker/build-push-action@v7
         with:
           context: .
-          target: jobs-lambda
+          target: jobs
           tags: ${{ github.event.repository.name }}-jobs:${{ github.sha }}
           cache-from: type=gha,scope=jobs
           cache-to: type=gha,scope=jobs,mode=max
+
+      # The Lambda variant is optional: a service without requirements-lambda.txt skips it.
+      - name: Build job runner Lambda image
+        if: hashFiles('app/worker.py') != '' && hashFiles('requirements-lambda.txt') != ''
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: jobs-lambda
+          tags: ${{ github.event.repository.name }}-jobs-lambda:${{ github.sha }}
+          cache-from: type=gha,scope=jobs-lambda
+          cache-to: type=gha,scope=jobs-lambda,mode=max

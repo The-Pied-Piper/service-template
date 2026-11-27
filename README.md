@@ -147,7 +147,7 @@ new tag appeared it tells you to wire the adapter into `app/main.py`.
 | --- | --- | --- | --- |
 | `app/generated/**` | generator | overwritten | overwritten (via sync) |
 | `app/adapters/inbound/*_adapter.py`, `app/application/ports/*_port.py`, `app/application/services/*_service.py` | you (scaffolded once) | created if missing | untouched |
-| `app/main.py`, `app/worker.py`, `app/scheduled_jobs.py`, `app/wiring.py`, `app/__main__.py`, `app/settings.py`, `app/adapters/inbound/http_errors.py`, `app/adapters/inbound/{cron,jobs_*}.py`, `app/domain/**`, `app/adapters/outbound/**`, `app/application/ports/*.py`, `app/application/scheduling/*.py`, `tests/**`, `README.md` | you (written by `init`) | untouched | untouched |
+| `app/main.py`, `app/worker.py`, `app/scheduled_jobs.py`, `app/wiring.py`, `app/__main__.py`, `app/settings.py`, `app/adapters/inbound/http_errors.py`, `app/adapters/inbound/{cron,jobs_*}.py`, `app/domain/**`, `app/adapters/outbound/**`, `app/application/ports/{clock,health,job_runner,job_runs}.py`, `app/application/scheduling/*.py`, `tests/**`, `README.md` | you (written by `init`) | untouched | untouched |
 | `Dockerfile`, `compose.yaml`, the root `requirements*.in` and `requirements*.txt`, `pyproject.toml`, `alembic.ini`, `migrations/` | you (shipped plain; `init` adds the `job_runs` migration) | untouched | untouched |
 | `dev.sh`, `scripts/`, `tools/service_gen/`, `.github/workflows/ci.yml` | template | untouched | **replaced** |
 | `service_scripts/` (the service's own `./dev.sh` commands) | you (shipped with a README) | untouched | untouched |
@@ -172,29 +172,28 @@ paired there with a name and a cron schedule. Cron text is read by `parse_cron`
 The template ships no jobs.
 
 ```python
-from app.adapters.inbound.cron import parse_cron
-from app.application.scheduling.task import ScheduledJob
-
-
-class PurgeOldMessages:  # a use case of yours; PurgePort is a port your service implements
-    def __init__(self, service: PurgePort) -> None:
-        self._service = service
+# app/application/services/purge_old_messages.py: a use case of yours. MessagesPort is a port
+# your own outbound adapter implements.
+class PurgeOldMessages:
+    def __init__(self, messages: MessagesPort) -> None:
+        self._messages = messages
 
     async def run(self) -> None:
-        await self._service.purge_old()
+        await self._messages.delete_older_than_months(12)
 
 
-# in build_scheduled_jobs(settings, wiring) in app/scheduled_jobs.py:
+# app/scheduled_jobs.py, in build_scheduled_jobs(settings, wiring):
 return (
     ScheduledJob(
         "purge-old-messages",
         parse_cron("0 0 * * *"),
-        PurgeOldMessages(PurgeService(PurgeRepository(wiring.session_factory))),
+        PurgeOldMessages(MessageRepository(wiring.session_factory)),
     ),
 )
 ```
 
-The name is the key of the job's row in `job_runs`; renaming it starts a new history. The runner
+The name is the key of the job's row in `job_runs` (one row per job, holding its last run);
+renaming it starts a new row. The runner
 asks tasks only for `run()`, through the `ScheduledTask` contract, so it never knows which
 services are behind them.
 
@@ -208,9 +207,12 @@ never ran, or when its schedule has fired since it last started, so a tick that 
 picked up by the next one. A due job is claimed with one atomic database write (it succeeds
 only if nobody else started the job since the row was read), run, and marked finished with
 its error text if it raised. Two overlapping ticks never run a job twice. A run that has been
-going for more than an hour is taken as crashed and its lock is ignored, so keep every job
-shorter than that (a job that outlives it is started again by a later tick, and the first run's
-late finish is ignored). One job failing never stops the others; the command exits 1 if any
+going for more than `stale_after` (an hour unless the `ScheduledJob` says otherwise) is taken as
+crashed and its lock is ignored once the job is due again, so keep every job shorter than that, or
+set a longer `stale_after` for it (a job that outlives it is started again by a later tick, and the
+first run's late finish is ignored). A killed run (a Lambda timeout, an out-of-memory kill) never
+marks its end, so it blocks the job until `stale_after` passes: set it a little above the longest
+the task really takes. One job failing never stops the others; the command exits 1 if any
 failed. A failed job is not retried until its next scheduled time.
 
 Extra ticks cost nothing, because a job that is not due is skipped. Trigger the command more often
@@ -326,7 +328,8 @@ The layer rules are `[tool.importlinter]` contracts in `pyproject.toml`, which t
 service owns: add contracts as it grows.
 
 - Layers point inward: `app.__main__`, then the two composition roots `app.main` and
-  `app.worker` (which never import each other), then `app.wiring` (what both share),
+  `app.worker` (which never import each other), then `app.scheduled_jobs` (the job runner's
+  jobs), then `app.wiring` (what both share),
   `app.adapters`, `app.application`, `app.domain`.
   Any other module under `app/` must be added to the layers (`app.generated` and
   `app.settings` are exempt), so a new module cannot slip in unchecked.
@@ -339,14 +342,18 @@ service owns: add contracts as it grows.
   sides never import each other.
 - Adapters and generated code never import `app.application.services`: only `app.main`
   knows the services. Adapters import ports; generated code does not (next rule).
-- `app.application` holds only `services` and `ports`, and services import ports, never
-  the reverse. A new module or folder there must be placed in one of them or in the rule.
+- Adapters and generated code never import `app.application.scheduling` either, and services
+  never import its runner (`due_job_runner`): they may implement its `ScheduledTask`.
+- `app.application` holds only `services`, `scheduling` and `ports`, and each imports only
+  what is below it in that order, never the reverse. A new module or folder there must be placed in one of them or in the rule.
 - Generated code (`app.generated`) directly imports nothing from the application, domain,
   outbound adapters, settings or `app.main`; its handlers reach the application through
   the inbound adapter they call (indirect imports are allowed).
 - Inbound adapters touch no database library (SQLAlchemy, asyncpg, Alembic) and no settings.
 - `app.settings` imports nothing else from the app.
-- `app.main`, `app.worker` and `app.wiring` are the composition roots and their shared factory.
+- `app.main`, `app.worker`, `app.scheduled_jobs` and `app.wiring` are the composition roots and
+  their shared factory. The server never imports the job runner, and `app.__main__` loads no web
+  stack; `app.wiring` builds no inbound adapter.
   They directly import concretes only: no ports, domain
   modules, generated models, Pydantic or `pydantic_core` (pass a longer list of probes
   inline or as a tuple: annotating it with the port type is not allowed). Translating errors

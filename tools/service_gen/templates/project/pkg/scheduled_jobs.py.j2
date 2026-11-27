@@ -15,18 +15,20 @@ from {{ package }}.wiring import Wiring
 def build_scheduled_jobs(settings: Settings, wiring: Wiring) -> tuple[ScheduledJob, ...]:
     """Pair each of your task use cases with a name and a UTC cron schedule.
 
-    A task is a use case with `async def run(self) -> None` that knows nothing of being
-    scheduled. For example, with `from {{ package }}.adapters.inbound.cron import parse_cron`:
+    A task is a use case (in `application/services/`) with `async def run(self) -> None` that
+    knows nothing of being scheduled. For example, with
+    `from {{ package }}.adapters.inbound.cron import parse_cron`:
 
         return (
             ScheduledJob(
                 "purge-old-messages",
                 parse_cron("0 0 * * *"),
-                PurgeOldMessages(PurgeRepository(wiring.session_factory)),
+                PurgeOldMessages(MessageRepository(wiring.session_factory)),
             ),
         )
 
-    The name is the key of the job's row in `job_runs`; renaming it starts a new history. A
-    repository that a request and a job both use belongs on `Wiring`.
+    The name is the key of the job's row in `job_runs` (the job's last run); renaming it starts a
+    new row. Pass `stale_after=` for a task that can run longer than an hour. A repository that a
+    request and a job both use belongs on `Wiring`.
     """
     return ()

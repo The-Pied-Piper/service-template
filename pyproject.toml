@@ -212,3 +212,32 @@ name = "Services implement ScheduledTask but never reach the runner that calls i
 type = "forbidden"
 source_modules = ["app.application.services"]
 forbidden_modules = ["app.application.scheduling.due_job_runner"]
+
+[[tool.importlinter.contracts]]
+id = "server-has-no-job-runner"
+name = "The HTTP server never loads the job runner's root, runner or entry-point adapters"
+type = "forbidden"
+source_modules = ["app.main"]
+forbidden_modules = [
+    "app.worker",
+    "app.scheduled_jobs",
+    "app.application.scheduling",
+    "app.adapters.inbound.jobs_cli",
+    "app.adapters.inbound.jobs_lambda",
+]
+# Direct imports only: the server reaches services, which are free to name the task contract.
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "command-line-is-web-free"
+name = "The command line loads no web framework, wire model or HTTP adapter"
+type = "forbidden"
+source_modules = ["app.__main__"]
+forbidden_modules = [
+    "connexion",
+    "fastapi",
+    "starlette",
+    "app.generated",
+    "app.main",
+    "app.adapters.inbound.http_errors",
+]
