@@ -4,7 +4,8 @@ The second way to start the service, next to the HTTP server in `main.py`. It bu
 application and loads no web framework. The command line (`python -m app run-due-jobs`) ends
 here. Something outside fires it, at midnight UTC for example. The jobs themselves are built in
 `scheduled_jobs.py`. `build_runner` is public so a service that triggers the runner another way
-(a Lambda handler, say) can add its own inbound adapter and call it.
+(a Lambda handler, say) can add its own inbound adapter and an entry function here that builds
+the runner and calls that adapter.
 """
 
 from __future__ import annotations

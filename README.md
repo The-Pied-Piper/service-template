@@ -232,7 +232,7 @@ trigger dies partway through the list, the jobs not reached run at the next tick
 implement `ScheduledTask`; the runner never imports them. `ScheduledTask` is not a port (no adapter
 calls or implements it), so it lives beside the ports, and adapters may not import it. Postgres and
 the system clock are outbound adapters. The `run-due-jobs` command is
-inbound adapters whose only job is to call the `JobRunner` port. The cron text is read by
+an inbound adapter whose only job is to call the `JobRunner` port. The cron text is read by
 `adapters/inbound/cron.py`, which the composition root calls.
 There are two composition roots, `app/main.py` (HTTP server) and `app/worker.py` (job runner,
 with `app/scheduled_jobs.py` for its jobs), and both take their engine, clock and repositories from
@@ -247,13 +247,14 @@ its port) is not in it. Use the same database settings as the web service. Anyth
 instead.
 
 **Triggering it another way.** The command line is the only trigger the template ships, because
-how a service is triggered is specific to where it runs. To trigger it differently (an AWS Lambda
-handler, an HTTP endpoint behind a scheduler), add your own thin inbound adapter that calls the
-runner's `run_due_jobs()`, as `adapters/inbound/jobs_cli.py` does, and build the runner with
-`build_runner(settings, wiring)` in `app/worker.py` (see `_run_cli` there, which also disposes the
-wiring), plus the image or dependency that trigger needs (for Lambda,
-a second image target with the Runtime Interface Client; it cannot share the web image, because
-the Lambda Web Adapter waits for a web server).
+how a service is triggered is specific to where it runs. To add one (an AWS Lambda handler, say),
+write a thin inbound adapter in `adapters/inbound/` that calls the `JobRunner` port's
+`run_due_jobs()`, as `jobs_cli.py` does. Put the synchronous entry function that builds the runner
+with `build_runner(settings, wiring)` and calls the adapter in `app/worker.py`, next to
+`run_due_jobs()` (which also disposes the wiring); a new top-level module must be added to the
+`layers` and `main-wires-concretes-only` contracts. Add whatever image or dependency that trigger
+needs: for Lambda, a second image target with the Runtime Interface Client, since the Lambda Web
+Adapter waits for a web server and the web image cannot be shared.
 
 An existing service adopts this by hand: see "Unreleased" in `CHANGELOG.md`.
 
@@ -418,7 +419,7 @@ dev.sh                   dispatcher: ./dev.sh <cmd> -> scripts/<cmd>.sh, else se
 scripts/                 one command per file; line 2 is its help text
 service_scripts/         a service's own commands, same shape; never replaced by upgrade
 tools/service_gen/       the generator: cli.py, spec.py, render.py, templates/, tests/
-.github/workflows/ci.yml lint + typecheck + test in Docker; prod image build
+.github/workflows/ci.yml lint + typecheck + test in Docker; prod and jobs image builds
 TEMPLATE_VERSION         what a service was last upgraded to
 ```
 
