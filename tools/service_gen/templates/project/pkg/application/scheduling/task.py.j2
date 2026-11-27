@@ -1,0 +1,27 @@
+"""What the runner is given: a task, and the name and schedule it runs under.
+
+A task is one use case of yours with a `run()` method. It knows nothing of being scheduled: the
+composition root pairs it with a name and a `Schedule` in a `ScheduledJob`.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from {{ package }}.domain.schedule import Schedule
+
+
+class ScheduledTask(Protocol):
+    async def run(self) -> None:
+        """Do the work once. Raise if it failed; the runner records that and moves on."""
+        ...
+
+
+@dataclass(frozen=True)
+class ScheduledJob:
+    """`name` is the key of the job's row in `job_runs`: renaming it starts a new history."""
+
+    name: str
+    schedule: Schedule
+    task: ScheduledTask

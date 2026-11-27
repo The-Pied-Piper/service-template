@@ -2,15 +2,20 @@
 
 The expression is the usual ``minute hour day-of-month month day-of-week``, read in UTC:
 ``*``, lists (``1,15``), ranges (``9-17``) and steps (``*/10``, ``0-30/5``) are supported,
-numbers only. Day of week is 0-6 with 0 as Sunday; 7 also means Sunday. A job adapter calls
-`parse_cron` for the schedule of each job it declares, like a request adapter turning a DTO
-into a domain object.
+numbers only. Day of week is 0-6 with 0 as Sunday; 7 also means Sunday. The composition root calls
+`parse_cron` for the schedule of each job it builds (`scheduled_jobs.py`), the way a request
+adapter turns a DTO into a domain object. Text that cannot be read raises `CronSyntaxError`.
 """
 
 from __future__ import annotations
 
 from {{ package }}.domain.errors import InvalidScheduleError
 from {{ package }}.domain.schedule import Schedule
+
+
+class CronSyntaxError(ValueError):
+    """The text is not a cron expression this module reads."""
+
 
 _FIELDS = (
     ("minute", 0, 59),
@@ -24,7 +29,7 @@ _FIELDS = (
 def parse_cron(expression: str) -> Schedule:
     parts = expression.split()
     if len(parts) != len(_FIELDS):
-        raise InvalidScheduleError(
+        raise CronSyntaxError(
             f"{expression!r}: expected 5 fields (minute hour day-of-month month day-of-week)"
         )
     minutes, hours, days, months, weekdays = (
@@ -51,7 +56,7 @@ def _parse_field(text: str, name: str, low: int, high: int) -> frozenset[int]:
         base, slash, step_text = part.partition("/")
         step = _number(step_text, name, text) if slash else 1
         if step < 1:
-            raise InvalidScheduleError(f"{name} {text!r}: the step must be at least 1")
+            raise CronSyntaxError(f"{name} {text!r}: the step must be at least 1")
         if base == "*":
             start, stop = low, high
         else:
@@ -59,12 +64,12 @@ def _parse_field(text: str, name: str, low: int, high: int) -> frozenset[int]:
             start = _number(first, name, text)
             stop = _number(last, name, text) if dash else (high if slash else start)
         if not low <= start <= stop <= high:
-            raise InvalidScheduleError(f"{name} {text!r}: must be within {low}-{high}")
+            raise CronSyntaxError(f"{name} {text!r}: must be within {low}-{high}")
         values.update(range(start, stop + 1, step))
     return frozenset(values)
 
 
 def _number(text: str, name: str, whole: str) -> int:
     if not text.isascii() or not text.isdigit() or len(text) > 4:
-        raise InvalidScheduleError(f"{name} {whole!r}: {text!r} is not a number")
+        raise CronSyntaxError(f"{name} {whole!r}: {text!r} is not a number")
     return int(text)

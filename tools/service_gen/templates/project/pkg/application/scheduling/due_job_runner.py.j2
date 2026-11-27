@@ -1,21 +1,22 @@
-"""Runs the scheduled jobs that are due. Implements JobRunner.
+"""Runs the scheduled jobs that are due. Implements the `JobRunner` port.
 
-Something outside the service fires this (EventBridge, cron, a Kubernetes CronJob), every
-day or more often; the service itself decides what is due. Each job is read, checked against
-its schedule, claimed with one atomic write, run, and marked finished. A job that raises is
-recorded as failed and the others still run.
+Something outside the service ticks this (the command line, an AWS Lambda), every day or more
+often; this decides what is due. Each job is read, checked against its schedule, claimed with
+one atomic write, run, and marked finished. A job that raises is recorded as failed and the
+others still run. The runner sees tasks only through `ScheduledTask`, never the services
+behind them.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import timedelta
 
 from {{ package }}.application.ports.clock import Clock
 from {{ package }}.application.ports.job_runner import JobResult, JobStatus, RunReport
 from {{ package }}.application.ports.job_runs import JobRunStore
-from {{ package }}.application.ports.jobs import Job
-from {{ package }}.application.services.job_registry import JobRegistry
+from {{ package }}.application.scheduling.task import ScheduledJob
 from {{ package }}.domain.job_run import is_due
 
 logger = logging.getLogger(__name__)
@@ -28,23 +29,30 @@ _MAX_ERROR_LENGTH = 2000
 DEFAULT_STALE_AFTER = timedelta(hours=1)
 
 
-class RunDueJobs:
+class DuplicateJobError(ValueError):
+    """Two jobs were given the same name. A mistake in the composition root, not a business rule."""
+
+
+class DueJobRunner:
     def __init__(
         self,
-        registry: JobRegistry,
+        jobs: Iterable[ScheduledJob],
         store: JobRunStore,
         clock: Clock,
         stale_after: timedelta = DEFAULT_STALE_AFTER,
     ) -> None:
-        self._registry = registry
+        self._jobs = tuple(jobs)
+        names = [job.name for job in self._jobs]
+        for name in sorted({name for name in names if names.count(name) > 1}):
+            raise DuplicateJobError(f"more than one scheduled job is named {name!r}")
         self._store = store
         self._clock = clock
         self._stale_after = stale_after
 
     async def run_due_jobs(self) -> RunReport:
-        return RunReport(tuple([await self._run_one(job) for job in self._registry.jobs()]))
+        return RunReport(tuple([await self._run_one(job) for job in self._jobs]))
 
-    async def _run_one(self, job: Job) -> JobResult:
+    async def _run_one(self, job: ScheduledJob) -> JobResult:
         now = self._clock.now()
         record = await self._store.get(job.name)
         seen = record.last_started_at if record else None
@@ -61,7 +69,7 @@ class RunDueJobs:
 
         error: str | None = None
         try:
-            await job.task()
+            await job.task.run()
         except Exception as exc:  # one job failing must not stop the others
             logger.exception("scheduled job %s failed", job.name)
             error = f"{type(exc).__name__}: {exc}"[:_MAX_ERROR_LENGTH]

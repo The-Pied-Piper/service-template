@@ -1,0 +1,32 @@
+"""The service's scheduled jobs: the one file you edit to add one. The template ships none.
+
+Part of the job runner's composition root (`worker.py` calls `build_scheduled_jobs`). Like
+`build_adapters()` in `main.py` it constructs concretes only: repositories from `wiring`, then
+your use cases, then the name and schedule each one runs under.
+"""
+
+from __future__ import annotations
+
+from {{ package }}.application.scheduling.task import ScheduledJob
+from {{ package }}.settings import Settings
+from {{ package }}.wiring import Wiring
+
+
+def build_scheduled_jobs(settings: Settings, wiring: Wiring) -> tuple[ScheduledJob, ...]:
+    """Pair each of your task use cases with a name and a UTC cron schedule.
+
+    A task is a use case with `async def run(self) -> None` that knows nothing of being
+    scheduled. For example, with `from {{ package }}.adapters.inbound.cron import parse_cron`:
+
+        return (
+            ScheduledJob(
+                "purge-old-messages",
+                parse_cron("0 0 * * *"),
+                PurgeOldMessages(PurgeRepository(wiring.session_factory)),
+            ),
+        )
+
+    The name is the key of the job's row in `job_runs`; renaming it starts a new history. A
+    repository that a request and a job both use belongs on `Wiring`.
+    """
+    return ()

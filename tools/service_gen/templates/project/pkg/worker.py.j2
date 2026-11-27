@@ -3,7 +3,7 @@
 The second way to start the service, next to the HTTP server in `main.py`. It builds no web
 application and loads no web framework. The command line (`python -m app run-due-jobs`) and the
 AWS Lambda handler (`{{ package }}.worker.handler`) both end here. Something outside fires it,
-at midnight UTC for example.
+at midnight UTC for example. The jobs themselves are built in `scheduled_jobs.py`.
 """
 
 from __future__ import annotations
@@ -12,34 +12,18 @@ import asyncio
 import logging
 import sys
 
-from {{ package }}.adapters.inbound.jobs import JobAdapter
 from {{ package }}.adapters.inbound.jobs_cli import run_due_jobs_command
 from {{ package }}.adapters.inbound.jobs_lambda import run_due_jobs_event
 from {{ package }}.adapters.outbound.db import SqlJobRunStore
-from {{ package }}.application.services.job_registry import JobRegistry
-from {{ package }}.application.services.run_due_jobs import RunDueJobs
+from {{ package }}.application.scheduling.due_job_runner import DueJobRunner
+from {{ package }}.scheduled_jobs import build_scheduled_jobs
 from {{ package }}.settings import Settings
 from {{ package }}.wiring import Wiring, build_wiring
 
 
-def build_job_adapters(settings: Settings, wiring: Wiring) -> tuple[JobAdapter, ...]:
-    """Construct services -> inbound job adapters, as `build_adapters()` does in `main.py`.
-
-    The template ships none. A service builds each job adapter here from the repositories on
-    `wiring` (a service that only jobs use is built here too; put on `Wiring` only what both
-    roots share) and returns it with the others:
-
-        return (PurgeJobsAdapter(PurgeService(PurgeRepository(wiring.session_factory))),)
-    """
-    return ()
-
-
-def _build_runner(settings: Settings, wiring: Wiring) -> RunDueJobs:
-    registry = JobRegistry()
-    for adapter in build_job_adapters(settings, wiring):
-        for job in adapter.jobs():
-            registry.register(job)
-    return RunDueJobs(registry, SqlJobRunStore(wiring.session_factory), wiring.clock)
+def _build_runner(settings: Settings, wiring: Wiring) -> DueJobRunner:
+    jobs = build_scheduled_jobs(settings, wiring)
+    return DueJobRunner(jobs, SqlJobRunStore(wiring.session_factory), wiring.clock)
 
 
 async def _run_cli(settings: Settings) -> int:

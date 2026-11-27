@@ -1,4 +1,4 @@
-"""RunDueJobs with an in-memory store and a clock the test sets."""
+"""DueJobRunner with an in-memory store and a clock the test sets."""
 
 import asyncio
 from datetime import UTC, datetime, timedelta
@@ -6,12 +6,10 @@ from typing import Protocol
 
 import pytest
 
-from {{ package }}.adapters.inbound.cron import parse_cron
+from {{ package }}.adapters.inbound.cron import CronSyntaxError, parse_cron
 from {{ package }}.application.ports.job_runner import JobStatus
-from {{ package }}.application.ports.jobs import Job
-from {{ package }}.application.services.job_registry import JobRegistry
-from {{ package }}.application.services.run_due_jobs import RunDueJobs
-from {{ package }}.domain.errors import DuplicateJobError, InvalidScheduleError
+from {{ package }}.application.scheduling.due_job_runner import DueJobRunner, DuplicateJobError
+from {{ package }}.application.scheduling.task import ScheduledJob
 from {{ package }}.domain.job_run import JobRun
 
 
@@ -65,16 +63,28 @@ class Counter:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def __call__(self) -> None:
+    async def run(self) -> None:
         self.calls += 1
 
 
-def build(*jobs: tuple[str, str, Counter]) -> tuple[RunDueJobs, FakeStore, FakeClock]:
-    registry = JobRegistry()
-    for name, schedule, task in jobs:
-        registry.register(Job(name, parse_cron(schedule), task))
+class Failing:
+    def __init__(self, message: str = "no") -> None:
+        self.calls = 0
+        self._message = message
+
+    async def run(self) -> None:
+        self.calls += 1
+        raise RuntimeError(self._message)
+
+
+def job(name: str, schedule: str, task: object) -> ScheduledJob:
+    return ScheduledJob(name, parse_cron(schedule), task)  # type: ignore[arg-type]
+
+
+def build(*jobs: tuple[str, str, Counter]) -> tuple[DueJobRunner, FakeStore, FakeClock]:
     store, clock = FakeStore(), FakeClock(MIDNIGHT)
-    return RunDueJobs(registry, store, clock), store, clock
+    runner = DueJobRunner([job(*each) for each in jobs], store, clock)
+    return runner, store, clock
 
 
 async def test_a_job_that_never_ran_runs_and_is_recorded() -> None:
@@ -131,15 +141,15 @@ async def test_each_job_follows_its_own_schedule() -> None:
 
 async def test_a_failing_job_is_recorded_and_the_others_still_run() -> None:
     after = Counter()
-
-    async def broken() -> None:
-        raise RuntimeError("disk is full")
-
-    registry = JobRegistry()
-    registry.register(Job("broken", parse_cron("0 0 * * *"), broken))
-    registry.register(Job("after", parse_cron("0 0 * * *"), after))
     store = FakeStore()
-    runner = RunDueJobs(registry, store, FakeClock(MIDNIGHT))
+    runner = DueJobRunner(
+        [
+            job("broken", "0 0 * * *", Failing("disk is full")),
+            job("after", "0 0 * * *", after),
+        ],
+        store,
+        FakeClock(MIDNIGHT),
+    )
 
     report = await runner.run_due_jobs()
 
@@ -162,10 +172,11 @@ async def test_a_store_failure_when_finishing_does_not_stop_the_other_jobs() -> 
             raise ConnectionError("database went away")
 
     after = Counter()
-    registry = JobRegistry()
-    registry.register(Job("first", parse_cron("0 0 * * *"), Counter()))
-    registry.register(Job("second", parse_cron("0 0 * * *"), after))
-    runner = RunDueJobs(registry, FinishFails(), FakeClock(MIDNIGHT))
+    runner = DueJobRunner(
+        [job("first", "0 0 * * *", Counter()), job("second", "0 0 * * *", after)],
+        FinishFails(),
+        FakeClock(MIDNIGHT),
+    )
 
     report = await runner.run_due_jobs()
 
@@ -174,32 +185,21 @@ async def test_a_store_failure_when_finishing_does_not_stop_the_other_jobs() -> 
 
 
 async def test_a_failed_job_waits_for_its_next_scheduled_time() -> None:
-    calls = 0
-
-    async def broken() -> None:
-        nonlocal calls
-        calls += 1
-        raise RuntimeError("no")
-
-    registry = JobRegistry()
-    registry.register(Job("broken", parse_cron("0 0 * * *"), broken))
+    broken = Failing()
     clock = FakeClock(MIDNIGHT)
-    runner = RunDueJobs(registry, FakeStore(), clock)
+    runner = DueJobRunner([job("broken", "0 0 * * *", broken)], FakeStore(), clock)
     await runner.run_due_jobs()
 
     clock.current = MIDNIGHT + timedelta(hours=1)
     await runner.run_due_jobs()
 
-    assert calls == 1
+    assert broken.calls == 1
 
 
 async def test_long_error_text_is_cut() -> None:
-    async def broken() -> None:
-        raise RuntimeError("x" * 10_000)
-
-    registry = JobRegistry()
-    registry.register(Job("broken", parse_cron("0 0 * * *"), broken))
-    runner = RunDueJobs(registry, FakeStore(), FakeClock(MIDNIGHT))
+    runner = DueJobRunner(
+        [job("broken", "0 0 * * *", Failing("x" * 10_000))], FakeStore(), FakeClock(MIDNIGHT)
+    )
 
     report = await runner.run_due_jobs()
 
@@ -235,9 +235,8 @@ async def test_a_lock_older_than_the_stale_limit_is_ignored() -> None:
 async def test_two_runners_over_one_store_run_the_job_once() -> None:
     task = Counter()
     store, clock = FakeStore(), FakeClock(MIDNIGHT)
-    registry = JobRegistry()
-    registry.register(Job("purge", parse_cron("0 0 * * *"), task))
-    first, second = RunDueJobs(registry, store, clock), RunDueJobs(registry, store, clock)
+    jobs = [job("purge", "0 0 * * *", task)]
+    first, second = DueJobRunner(jobs, store, clock), DueJobRunner(jobs, store, clock)
 
     await asyncio.gather(first.run_due_jobs(), second.run_due_jobs())
 
@@ -245,34 +244,43 @@ async def test_two_runners_over_one_store_run_the_job_once() -> None:
 
 
 async def test_no_jobs_is_an_empty_report() -> None:
-    report = await RunDueJobs(JobRegistry(), FakeStore(), FakeClock(MIDNIGHT)).run_due_jobs()
+    report = await DueJobRunner([], FakeStore(), FakeClock(MIDNIGHT)).run_due_jobs()
     assert report.results == ()
     assert not report.failed
 
 
-def test_the_services_registered_jobs_have_valid_schedules_and_unique_names() -> None:
-    """Needs no database: building the job list must not fail."""
+def test_the_services_scheduled_jobs_have_valid_schedules_and_unique_names() -> None:
+    """Needs no database: building the job list and the runner must not fail."""
+    from {{ package }}.scheduled_jobs import build_scheduled_jobs
     from {{ package }}.settings import Settings
     from {{ package }}.wiring import build_wiring
-    from {{ package }}.worker import build_job_adapters
 
     settings = Settings()
-    registry = JobRegistry()
-    for adapter in build_job_adapters(settings, build_wiring(settings)):
-        for job in adapter.jobs():
-            registry.register(job)
+    jobs = build_scheduled_jobs(settings, build_wiring(settings))
+    DueJobRunner(jobs, FakeStore(), FakeClock(MIDNIGHT))
 
 
-def test_registering_refuses_a_duplicate_name() -> None:
-    registry = JobRegistry()
-    registry.register(Job("purge", parse_cron("0 0 * * *"), Counter()))
-    with pytest.raises(DuplicateJobError):
-        registry.register(Job("purge", parse_cron("0 1 * * *"), Counter()))
-    assert [job.name for job in registry.jobs()] == ["purge"]
+def test_two_jobs_with_one_name_are_refused() -> None:
+    with pytest.raises(DuplicateJobError, match="purge"):
+        DueJobRunner(
+            [job("purge", "0 0 * * *", Counter()), job("purge", "0 1 * * *", Counter())],
+            FakeStore(),
+            FakeClock(MIDNIGHT),
+        )
 
 
-def test_a_bad_cron_expression_fails_when_the_job_adapter_declares_it() -> None:
-    with pytest.raises(InvalidScheduleError):
+def test_the_runner_keeps_the_list_it_was_given() -> None:
+    jobs = [job("purge", "0 0 * * *", Counter())]
+    runner = DueJobRunner(jobs, FakeStore(), FakeClock(MIDNIGHT))
+    jobs.append(job("other", "0 0 * * *", Counter()))
+
+    report = asyncio.run(runner.run_due_jobs())
+
+    assert [r.name for r in report.results] == ["purge"]
+
+
+def test_text_that_is_not_cron_fails_when_the_job_is_built() -> None:
+    with pytest.raises(CronSyntaxError):
         parse_cron("every day")
 
 
@@ -280,20 +288,18 @@ class PurgePort(Protocol):
     async def purge_old(self) -> None: ...
 
 
-class PurgeJobsAdapter:
-    """The shape of a job adapter: an inbound adapter that declares jobs and calls a port."""
+class PurgeOldMessages:
+    """The shape of a task: a use case with run(), knowing nothing of being scheduled. It calls
+    the port its service implements."""
 
     def __init__(self, service: PurgePort) -> None:
         self._service = service
 
-    def jobs(self) -> tuple[Job, ...]:
-        return (Job("purge-old-messages", parse_cron("0 0 * * *"), self._purge),)
-
-    async def _purge(self) -> None:
+    async def run(self) -> None:
         await self._service.purge_old()
 
 
-async def test_a_job_adapter_runs_its_service_through_the_registry() -> None:
+async def test_a_use_case_runs_as_a_task_through_the_runner() -> None:
     class PurgeService:
         purged = 0
 
@@ -301,10 +307,11 @@ async def test_a_job_adapter_runs_its_service_through_the_registry() -> None:
             self.purged += 1
 
     service = PurgeService()
-    registry = JobRegistry()
-    for job in PurgeJobsAdapter(service).jobs():
-        registry.register(job)
-    runner = RunDueJobs(registry, FakeStore(), FakeClock(MIDNIGHT))
+    runner = DueJobRunner(
+        [job("purge-old-messages", "0 0 * * *", PurgeOldMessages(service))],
+        FakeStore(),
+        FakeClock(MIDNIGHT),
+    )
 
     report = await runner.run_due_jobs()
 

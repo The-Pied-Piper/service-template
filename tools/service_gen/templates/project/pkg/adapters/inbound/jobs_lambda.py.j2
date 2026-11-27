@@ -6,7 +6,11 @@ too, so Lambda's error metrics show it; the failed job is not retried until it i
 
 from __future__ import annotations
 
-from {{ package }}.application.ports.job_runner import JobRunner, JobsFailedError
+from {{ package }}.application.ports.job_runner import JobRunner
+
+
+class JobsFailedError(Exception):
+    """At least one scheduled job raised; the message names them."""
 
 
 async def run_due_jobs_event(runner: JobRunner) -> dict[str, list[str]]:

@@ -9,14 +9,9 @@ from pathlib import Path
 import pytest
 
 from {{ package }}.adapters.inbound.jobs_cli import run_due_jobs_command
-from {{ package }}.adapters.inbound.jobs_lambda import run_due_jobs_event
+from {{ package }}.adapters.inbound.jobs_lambda import JobsFailedError, run_due_jobs_event
 from {{ package }}.adapters.outbound.db import Base, create_engine
-from {{ package }}.application.ports.job_runner import (
-    JobResult,
-    JobsFailedError,
-    JobStatus,
-    RunReport,
-)
+from {{ package }}.application.ports.job_runner import JobResult, JobStatus, RunReport
 from {{ package }}.settings import Settings
 from {{ package }}.worker import handler
 
@@ -78,7 +73,7 @@ async def _prepare_database() -> bool:
         await engine.dispose()
 
 
-def test_the_command_line_runs_with_no_jobs_registered() -> None:
+def test_the_command_line_runs_with_no_jobs_scheduled() -> None:
     if not asyncio.run(_prepare_database()):
         pytest.skip("no database reachable")
 
@@ -93,7 +88,7 @@ def test_the_command_line_runs_with_no_jobs_registered() -> None:
     assert result.stdout == ""
 
 
-def test_the_lambda_handler_runs_with_no_jobs_registered() -> None:
+def test_the_lambda_handler_runs_with_no_jobs_scheduled() -> None:
     if not asyncio.run(_prepare_database()):
         pytest.skip("no database reachable")
 

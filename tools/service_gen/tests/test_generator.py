@@ -69,17 +69,16 @@ def test_init_writes_expected_layout(project: Path) -> None:
         "app/application/ports/job_runs.py",
         "app/application/ports/job_runner.py",
         "app/application/ports/clock.py",
-        "app/application/services/job_registry.py",
-        "app/application/services/run_due_jobs.py",
+        "app/application/scheduling/task.py",
+        "app/application/scheduling/due_job_runner.py",
         "app/adapters/outbound/db/job_runs.py",
         "app/adapters/outbound/clock.py",
         "app/adapters/inbound/cron.py",
-        "app/application/ports/jobs.py",
-        "app/adapters/inbound/jobs.py",
         "app/adapters/inbound/jobs_cli.py",
         "app/adapters/inbound/jobs_lambda.py",
         "app/wiring.py",
         "app/worker.py",
+        "app/scheduled_jobs.py",
         "app/__main__.py",
         "migrations/versions/20261127_0000_0001_create_job_runs.py",
         "tests/test_app.py",
@@ -316,6 +315,7 @@ WORKER_FORBIDDEN = (
     "app.adapters.inbound.http_errors"
 ).split()
 SERVICES = "app.application.services.status_service"
+SCHEDULING = "import app.application.scheduling.task"
 
 PLANTED_VIOLATIONS = [
     # Layers point inward, and every module is placed.
@@ -373,14 +373,27 @@ PLANTED_VIOLATIONS = [
     # The job runner never loads the web stack, even through another module.
     *[("worker-is-web-free", "app/worker.py", f"import {m}") for m in WORKER_FORBIDDEN],
     ("worker-is-web-free", "app/wiring.py", "import connexion"),
+    ("worker-is-web-free", "app/scheduled_jobs.py", "import connexion"),
     ("wiring-builds-no-inbound-adapters", "app/wiring.py", "import app.adapters.inbound.jobs_cli"),
     *[("main-wires-concretes-only", "app/__main__.py", f"import {m}") for m in MAIN_FORBIDDEN],
     ("layers", "app/wiring.py", "import app.__main__"),
+    # Adapters never reach the scheduling package, and services never reach its runner.
+    ("adapters-depend-on-ports-only", "app/adapters/inbound/plant.py", SCHEDULING),
+    ("adapters-depend-on-ports-only", "app/adapters/outbound/plant.py", SCHEDULING),
     (
-        "jobs-come-from-inbound-adapters",
-        "app/adapters/outbound/plant.py",
-        "import app.application.ports.jobs",
+        "services-see-the-task-contract-only",
+        "app/application/services/plant.py",
+        "import app.application.scheduling.due_job_runner",
     ),
+    ("application-sublayers", "app/application/scheduling/plant.py", f"import {SERVICES}"),
+    ("application-sublayers", "app/application/ports/plant.py", SCHEDULING),
+    # The scheduled jobs module is part of the job runner's root.
+    *[
+        ("main-wires-concretes-only", "app/scheduled_jobs.py", f"import {m}")
+        for m in MAIN_FORBIDDEN
+    ],
+    ("layers", "app/scheduled_jobs.py", "import app.worker"),
+    ("layers", "app/wiring.py", "import app.scheduled_jobs"),
     # No event loop below the adapters (the CORE_FORBIDDEN plants cover the domain).
     ("core-framework-free", "app/application/ports/plant.py", "import asyncio"),
 ]

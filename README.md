@@ -147,7 +147,7 @@ new tag appeared it tells you to wire the adapter into `app/main.py`.
 | --- | --- | --- | --- |
 | `app/generated/**` | generator | overwritten | overwritten (via sync) |
 | `app/adapters/inbound/*_adapter.py`, `app/application/ports/*_port.py`, `app/application/services/*_service.py` | you (scaffolded once) | created if missing | untouched |
-| `app/main.py`, `app/worker.py`, `app/wiring.py`, `app/__main__.py`, `app/settings.py`, `app/adapters/inbound/http_errors.py`, `app/adapters/inbound/{cron,jobs,jobs_*}.py`, `app/domain/**`, `app/adapters/outbound/**`, `app/application/ports/*.py`, `app/application/services/{job_registry,run_due_jobs}.py`, `tests/**`, `README.md` | you (written by `init`) | untouched | untouched |
+| `app/main.py`, `app/worker.py`, `app/scheduled_jobs.py`, `app/wiring.py`, `app/__main__.py`, `app/settings.py`, `app/adapters/inbound/http_errors.py`, `app/adapters/inbound/{cron,jobs_*}.py`, `app/domain/**`, `app/adapters/outbound/**`, `app/application/ports/*.py`, `app/application/scheduling/*.py`, `tests/**`, `README.md` | you (written by `init`) | untouched | untouched |
 | `Dockerfile`, `compose.yaml`, the root `requirements*.in` and `requirements*.txt`, `pyproject.toml`, `alembic.ini`, `migrations/` | you (shipped plain; `init` adds the `job_runs` migration) | untouched | untouched |
 | `dev.sh`, `scripts/`, `tools/service_gen/`, `.github/workflows/ci.yml` | template | untouched | **replaced** |
 | `service_scripts/` (the service's own `./dev.sh` commands) | you (shipped with a README) | untouched | untouched |
@@ -165,37 +165,43 @@ jobs**, runs whatever is due. Something outside the service fires that command o
 python -m app serve                # the HTTP server (the same as the image's default uvicorn command)
 ```
 
-**Declare a job** the way you declare an endpoint: an inbound **job adapter** declares it and calls
-a **port** that your service implements. The adapter turns the cron text into a domain schedule
-with `parse_cron` (`app/adapters/inbound/cron.py`), as a request adapter turns a DTO into a domain
-object. Then return the adapter from `build_job_adapters()` in `app/worker.py`, like
-`build_adapters()` in `main.py` for requests. Name the adapter `adapters/inbound/<name>_jobs.py`
-and its port `application/ports/<name>_port.py`, next to the request adapters and their ports. The
-template ships no jobs.
+**Declare a job** in `app/scheduled_jobs.py`, the one file you edit. A job is a **task**, one use
+case of yours with an `async def run(self) -> None` method that knows nothing of being scheduled,
+paired there with a name and a cron schedule. Cron text is read by `parse_cron`
+(`app/adapters/inbound/cron.py`) in that file, so the domain and the application never read text.
+The template ships no jobs.
 
 ```python
 from app.adapters.inbound.cron import parse_cron
-from app.application.ports.jobs import Job
+from app.application.scheduling.task import ScheduledJob
 
 
-class PurgeJobsAdapter:  # PurgePort is your own port, implemented by your service
+class PurgeOldMessages:  # a use case of yours; PurgePort is a port your service implements
     def __init__(self, service: PurgePort) -> None:
         self._service = service
 
-    def jobs(self) -> tuple[Job, ...]:
-        return (Job("purge-old-messages", parse_cron("0 0 * * *"), self._purge),)
-
-    async def _purge(self) -> None:
+    async def run(self) -> None:
         await self._service.purge_old()
 
 
-# in build_job_adapters(settings, wiring) in app/worker.py:
-return (PurgeJobsAdapter(PurgeService(PurgeRepository(wiring.session_factory))),)
+# in build_scheduled_jobs(settings, wiring) in app/scheduled_jobs.py:
+return (
+    ScheduledJob(
+        "purge-old-messages",
+        parse_cron("0 0 * * *"),
+        PurgeOldMessages(PurgeService(PurgeRepository(wiring.session_factory))),
+    ),
+)
 ```
 
+The name is the key of the job's row in `job_runs`; renaming it starts a new history. The runner
+asks tasks only for `run()`, through the `ScheduledTask` contract, so it never knows which
+services are behind them.
+
 The schedule is five-field cron in UTC: `*`, lists, ranges and steps, numbers only; day of week
-is 0-6 with 0 as Sunday. A bad schedule or a duplicate name raises when the job runner builds its
-list, so a generated test (which builds it without a database) fails in CI instead of at midnight.
+is 0-6 with 0 as Sunday. Text that is not cron raises `CronSyntaxError`, a schedule that never fires raises
+`InvalidScheduleError`, and a duplicate name raises `DuplicateJobError`, all when the job runner
+builds its list, so a generated test (which builds it without a database) fails in CI instead of at midnight.
 
 **What happens on each run.** For every job: read its row in `job_runs`; it is due when it
 never ran, or when its schedule has fired since it last started, so a tick that was missed is
@@ -213,13 +219,18 @@ lands a second early (the runner's own clock decides) skips the job until the ne
 trigger dies partway through the list, the jobs not reached run at the next tick.
 
 **Layout.** The "is it due" rule and the `Schedule` value are in the domain (`schedule.py`,
-`job_run.py`); the cron text is parsed by the inbound adapter `cron.py`, not the domain. The application has the registry and the `RunDueJobs` service, which talks only to
-ports (`JobRunStore`, `Clock`). Postgres and the system clock are outbound adapters. The
-`run-due-jobs` command and the Lambda handler are inbound adapters that call the `JobRunner` port.
-There are two composition roots, `app/main.py` (HTTP server) and `app/worker.py` (job runner),
-and both take their engine, clock and repositories from the shared `app/wiring.py`. Put a
-repository or service that a job and an endpoint both use on `Wiring`. Each root builds its own
-inbound adapters: request adapters in `main.py`, job adapters in `worker.py`.
+`job_run.py`). The application has a small scheduling package, `application/scheduling`: the
+`ScheduledTask` contract and `ScheduledJob` pairing, and `DueJobRunner`, which implements the
+`JobRunner` port and talks only to ports (`JobRunStore`, `Clock`) and `ScheduledTask`. Your tasks
+implement `ScheduledTask`; the runner never imports them. `ScheduledTask` is not a port (no adapter
+calls or implements it), so it lives beside the ports, and adapters may not import it. Postgres and
+the system clock are outbound adapters. The `run-due-jobs` command and the Lambda handler are
+inbound adapters whose only job is to call the `JobRunner` port. The cron text is read by
+`adapters/inbound/cron.py`, which the composition root calls.
+There are two composition roots, `app/main.py` (HTTP server) and `app/worker.py` (job runner,
+with `app/scheduled_jobs.py` for its jobs), and both take their engine, clock and repositories from
+the shared `app/wiring.py`. Put a repository or service that a job and an endpoint both use on
+`Wiring`.
 
 **Images.** The `prod` target is the HTTP server. The `jobs` target runs `python -m app
 run-due-jobs`, for a CronJob or a scheduled container task. The `jobs-lambda` target is the same

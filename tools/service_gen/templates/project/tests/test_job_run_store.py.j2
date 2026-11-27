@@ -17,9 +17,8 @@ from {{ package }}.adapters.outbound.db import (
     create_session_factory,
 )
 from {{ package }}.application.ports.job_runner import JobStatus
-from {{ package }}.application.ports.jobs import Job
-from {{ package }}.application.services.job_registry import JobRegistry
-from {{ package }}.application.services.run_due_jobs import RunDueJobs
+from {{ package }}.application.scheduling.due_job_runner import DueJobRunner
+from {{ package }}.application.scheduling.task import ScheduledJob
 from {{ package }}.domain.job_run import JobRun
 from {{ package }}.settings import Settings
 
@@ -140,13 +139,12 @@ class FixedClock:
 async def test_run_due_jobs_over_postgres(store: SqlJobRunStore, name: str) -> None:
     calls: list[str] = []
 
-    async def task() -> None:
-        calls.append(name)
+    class Task:
+        async def run(self) -> None:
+            calls.append(name)
 
-    registry = JobRegistry()
-    registry.register(Job(name, parse_cron("0 0 * * *"), task))
     clock = FixedClock(NOW)
-    runner = RunDueJobs(registry, store, clock)
+    runner = DueJobRunner([ScheduledJob(name, parse_cron("0 0 * * *"), Task())], store, clock)
 
     first = await runner.run_due_jobs()
     clock.current = NOW + timedelta(hours=5)

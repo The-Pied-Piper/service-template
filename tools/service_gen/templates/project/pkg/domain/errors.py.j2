@@ -21,8 +21,4 @@ class ValidationError(DomainError):
 
 
 class InvalidScheduleError(ValidationError):
-    """A schedule that is out of bounds or never fires, or declared in text that cannot be read."""
-
-
-class DuplicateJobError(ConflictError):
-    """Two scheduled jobs were registered under the same name."""
+    """A schedule that is out of bounds or never fires."""
