@@ -48,21 +48,23 @@ class DueJobRunner:
         return RunReport(tuple([await self._run_one(job) for job in self._jobs]))
 
     async def _run_one(self, job: ScheduledJob) -> JobResult:
+        now = self._clock.now()
         try:
-            now = self._clock.now()
             record = await self._store.get(job.name)
-            seen = record.last_started_at if record else None
-            if not is_due(job.schedule, seen, now):
-                return JobResult(job.name, JobStatus.NOT_DUE)
+        except Exception as exc:  # the store is down: report this job, the others may still work
+            return self._not_started(job, exc)
+        seen = record.last_started_at if record else None
+        if not is_due(job.schedule, seen, now):
+            return JobResult(job.name, JobStatus.NOT_DUE)
+        try:
             claimed = await self._store.claim(
                 job.name,
                 seen_last_started_at=seen,
                 now=now,
                 locked_since_before=now - job.stale_after,
             )
-        except Exception as exc:  # the store is down: report this job, the others may still work
-            logger.exception("could not start scheduled job %s", job.name)
-            return JobResult(job.name, JobStatus.FAILED, _describe(exc))
+        except Exception as exc:
+            return self._not_started(job, exc)
         if not claimed:
             return JobResult(job.name, JobStatus.CLAIMED_ELSEWHERE)
 
@@ -79,6 +81,11 @@ class DueJobRunner:
         except Exception:  # the lock goes stale by itself; the other jobs still run
             logger.exception("could not record the end of scheduled job %s", job.name)
         return JobResult(job.name, JobStatus.FAILED if error else JobStatus.RAN, error)
+
+    @staticmethod
+    def _not_started(job: ScheduledJob, exc: Exception) -> JobResult:
+        logger.error("could not start scheduled job %s", job.name, exc_info=exc)
+        return JobResult(job.name, JobStatus.FAILED, _describe(exc))
 
 
 def _describe(exc: Exception) -> str:

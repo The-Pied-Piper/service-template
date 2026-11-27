@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, inspect, text
+from sqlalchemy import delete, func, inspect, select, text
 
 from {{ package }}.adapters.inbound.cron import parse_cron
 from {{ package }}.adapters.outbound.db import (
@@ -26,7 +26,7 @@ LONG_AGO = NOW - timedelta(hours=1)
 
 
 @pytest.fixture
-async def store() -> AsyncIterator[SqlJobRunStore]:
+async def store(name: str) -> AsyncIterator[SqlJobRunStore]:
     engine = create_engine(Settings())
     table = JobRunRow.metadata.tables[JobRunRow.__tablename__]
     try:
@@ -42,8 +42,11 @@ async def store() -> AsyncIterator[SqlJobRunStore]:
         pytest.skip("no database reachable")
     yield SqlJobRunStore(create_session_factory(engine))
     async with engine.begin() as connection:
-        await connection.execute(delete(JobRunRow).where(JobRunRow.name.like("test-%")))
-        if not existed:
+        await connection.execute(delete(JobRunRow).where(JobRunRow.name == name))
+        # Drop the table only if this fixture made it and nobody else (another test run on the
+        # same database) has rows in it.
+        remaining = await connection.scalar(select(func.count()).select_from(table))
+        if not existed and remaining == 0:
             await connection.run_sync(table.drop)
     await engine.dispose()
 

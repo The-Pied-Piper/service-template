@@ -215,6 +215,11 @@ marks its end, so it blocks the job until `stale_after` passes: set it a little 
 the task really takes. One job failing never stops the others; the command exits 1 if any
 failed. A failed job is not retried until its next scheduled time.
 
+A job that has never run is due at the first tick after it is deployed (or renamed), so a new
+monthly job runs at once. Jobs run one after another in one process, so a long job delays the ones
+after it in the same tick, and under Lambda's time limit it can starve them: split slow work into
+separate jobs or schedules.
+
 Extra ticks cost nothing, because a job that is not due is skipped. Trigger the command more often
 than your finest schedule, for example hourly, or a few minutes past the fire time: a tick that
 lands a second early (the runner's own clock decides) skips the job until the next tick. If the
@@ -240,8 +245,8 @@ as an AWS Lambda container image (handler `app.worker.handler`, via the Runtime 
 Client). Both are built from the stage before `prod`, so a Lambda Web Adapter you add to `prod`
 is not in them. That matters because the adapter waits for a web server on its port before it
 serves anything, so a job invocation cannot share the web image. A handler failure means a job
-raised, so Lambda's error metric shows it. Use the same database settings as the web service. The
-`jobs-lambda` target's pins are in `requirements-lambda.txt`. Anything you add to `prod` that the
+raised or the store could not be reached, so Lambda's error metric shows it. Use the same
+database settings as the web service. The `jobs-lambda` target's pins are in `requirements-lambda.txt`. Anything you add to `prod` that the
 job runner also needs (system packages, `ENV`) belongs in the `runtime` stage instead.
 
 An existing service adopts this by hand: see "Unreleased" in `CHANGELOG.md`.

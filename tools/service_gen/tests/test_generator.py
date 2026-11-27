@@ -383,6 +383,17 @@ PLANTED_VIOLATIONS = [
     ("worker-is-web-free", "app/scheduled_jobs.py", "import connexion"),
     # The server never loads the job runner; the command line never loads the web stack.
     *[("server-has-no-job-runner", "app/main.py", f"import {m}") for m in SERVER_FORBIDDEN],
+    # ... nor through a module the server reaches.
+    (
+        "server-has-no-job-runner",
+        "app/wiring.py",
+        "import app.application.scheduling.due_job_runner",
+    ),
+    (
+        "server-has-no-job-runner",
+        "app/adapters/inbound/http_errors.py",
+        "import app.adapters.inbound.jobs_cli",
+    ),
     *[("command-line-is-web-free", "app/__main__.py", f"import {m}") for m in CLI_FORBIDDEN],
     ("wiring-builds-no-inbound-adapters", "app/wiring.py", "import app.adapters.inbound.jobs_cli"),
     *[("main-wires-concretes-only", "app/__main__.py", f"import {m}") for m in MAIN_FORBIDDEN],

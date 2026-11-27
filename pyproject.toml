@@ -221,12 +221,12 @@ source_modules = ["app.main"]
 forbidden_modules = [
     "app.worker",
     "app.scheduled_jobs",
-    "app.application.scheduling",
+    "app.application.scheduling.due_job_runner",
     "app.adapters.inbound.jobs_cli",
     "app.adapters.inbound.jobs_lambda",
 ]
-# Direct imports only: the server reaches services, which are free to name the task contract.
-allow_indirect_imports = true
+# Indirect imports count: a module the server reaches (wiring, an adapter) must not pull the
+# runner in either. Services may still name the task contract (`scheduling.task`).
 
 [[tool.importlinter.contracts]]
 id = "command-line-is-web-free"
