@@ -48,10 +48,11 @@ CMD ["python", "-m", "app", "run-due-jobs"]
 
 # --- jobs-lambda: the same, as an AWS Lambda container image (handler app.worker.handler) ---
 # The AWS Runtime Interface Client lets Lambda call the handler directly. No web adapter, no
-# server, no HTTP request. The version is pinned; bump it here with the rest of the pins.
+# server, no HTTP request. Its pins are in requirements-lambda.txt (Dependabot bumps them).
 FROM jobs AS jobs-lambda
 USER root
-RUN --mount=type=cache,target=/root/.cache/pip pip install "awslambdaric==4.2.3"
+COPY requirements-lambda.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements-lambda.txt
 USER app
 ENTRYPOINT ["python", "-m", "awslambdaric"]
 CMD ["app.worker.handler"]

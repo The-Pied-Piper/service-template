@@ -55,7 +55,7 @@ async def test_claim_then_finish_round_trip(store: SqlJobRunStore, name: str) ->
     assert await store.get(name) == JobRun(name, last_started_at=NOW, running_since=NOW)
 
     later = NOW + timedelta(seconds=4)
-    await store.finish(name, finished_at=later, error="boom")
+    await store.finish(name, started_at=NOW, finished_at=later, error="boom")
 
     assert await store.get(name) == JobRun(
         name, last_started_at=NOW, last_finished_at=later, running_since=None, last_error="boom"
@@ -64,7 +64,7 @@ async def test_claim_then_finish_round_trip(store: SqlJobRunStore, name: str) ->
 
 async def test_a_claim_on_an_out_of_date_record_loses(store: SqlJobRunStore, name: str) -> None:
     assert await store.claim(name, seen_last_started_at=None, now=NOW, locked_since_before=LONG_AGO)
-    await store.finish(name, finished_at=NOW, error=None)
+    await store.finish(name, started_at=NOW, finished_at=NOW, error=None)
 
     # A runner that read the record before the first claim tries now, after it finished.
     assert not await store.claim(
@@ -84,6 +84,22 @@ async def test_a_running_job_cannot_be_claimed_until_the_lock_is_stale(
     assert await store.claim(
         name, seen_last_started_at=NOW, now=day, locked_since_before=NOW + timedelta(seconds=1)
     )
+
+
+async def test_a_run_that_outlived_its_lock_cannot_finish_the_next_one(
+    store: SqlJobRunStore, name: str
+) -> None:
+    assert await store.claim(name, seen_last_started_at=None, now=NOW, locked_since_before=LONG_AGO)
+    later = NOW + timedelta(hours=2)
+    # The first run is taken as crashed; a second run claims the job.
+    assert await store.claim(
+        name, seen_last_started_at=NOW, now=later, locked_since_before=NOW + timedelta(hours=1)
+    )
+
+    # The first run finally finishes: it must leave the second run's lock alone.
+    await store.finish(name, started_at=NOW, finished_at=later, error="late")
+
+    assert await store.get(name) == JobRun(name, last_started_at=later, running_since=later)
 
 
 async def test_of_many_simultaneous_claims_exactly_one_wins(

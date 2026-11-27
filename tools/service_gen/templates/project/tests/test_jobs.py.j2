@@ -46,8 +46,12 @@ class FakeStore:
         self.runs[name] = JobRun(name, now, run.last_finished_at, now, run.last_error)
         return True
 
-    async def finish(self, name: str, *, finished_at: datetime, error: str | None) -> None:
+    async def finish(
+        self, name: str, *, started_at: datetime, finished_at: datetime, error: str | None
+    ) -> None:
         run = self.runs[name]
+        if run.last_started_at != started_at:
+            return
         self.runs[name] = JobRun(name, run.last_started_at, finished_at, None, error)
 
 
@@ -147,6 +151,38 @@ async def test_a_failing_job_is_recorded_and_the_others_still_run() -> None:
     assert after.calls == 1
 
 
+async def test_a_store_failure_when_finishing_does_not_stop_the_other_jobs() -> None:
+    class FinishFails(FakeStore):
+        async def finish(
+            self, name: str, *, started_at: datetime, finished_at: datetime, error: str | None
+        ) -> None:
+            raise ConnectionError("database went away")
+
+    after = Counter()
+    registry = JobRegistry()
+    registry.register("first", "0 0 * * *", Counter())
+    registry.register("second", "0 0 * * *", after)
+    runner = RunDueJobs(registry, FinishFails(), FakeClock(MIDNIGHT))
+
+    report = await runner.run_due_jobs()
+
+    assert [r.status for r in report.results] == [JobStatus.RAN, JobStatus.RAN]
+    assert after.calls == 1
+
+
+async def test_a_nul_character_in_an_error_message_is_dropped() -> None:
+    async def broken() -> None:
+        raise ValueError("a\x00b")
+
+    registry = JobRegistry()
+    registry.register("broken", "0 0 * * *", broken)
+    runner = RunDueJobs(registry, FakeStore(), FakeClock(MIDNIGHT))
+
+    report = await runner.run_due_jobs()
+
+    assert report.results[0].error == "ValueError: ab"
+
+
 async def test_a_failed_job_waits_for_its_next_scheduled_time() -> None:
     calls = 0
 
@@ -190,7 +226,7 @@ async def test_a_job_running_elsewhere_is_skipped() -> None:
 
     report = await runner.run_due_jobs()
 
-    assert report.results[0].status is JobStatus.RUNNING_ELSEWHERE
+    assert report.results[0].status is JobStatus.CLAIMED_ELSEWHERE
     assert task.calls == 0
 
 
@@ -222,6 +258,14 @@ async def test_no_jobs_is_an_empty_report() -> None:
     report = await RunDueJobs(JobRegistry(), FakeStore(), FakeClock(MIDNIGHT)).run_due_jobs()
     assert report.results == ()
     assert not report.failed
+
+
+def test_the_services_registered_jobs_have_valid_schedules_and_unique_names() -> None:
+    """Needs no database: building the job list must not fail."""
+    from {{ package }}.settings import Settings
+    from {{ package }}.wiring import build_wiring, register_jobs
+
+    register_jobs(JobRegistry(), build_wiring(Settings()))
 
 
 def test_registering_checks_the_name_and_the_schedule() -> None:

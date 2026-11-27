@@ -11,7 +11,7 @@ class JobStatus(StrEnum):
     RAN = "ran"
     FAILED = "failed"
     NOT_DUE = "not due"
-    RUNNING_ELSEWHERE = "running elsewhere"
+    CLAIMED_ELSEWHERE = "claimed elsewhere"
 
 
 @dataclass(frozen=True)

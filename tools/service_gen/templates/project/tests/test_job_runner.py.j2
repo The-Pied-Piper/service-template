@@ -95,10 +95,11 @@ def test_the_lambda_handler_runs_with_no_jobs_registered() -> None:
     assert handler({}, None) == {"results": []}
 
 
-def test_the_command_line_does_not_load_the_web_application() -> None:
+def test_the_job_runner_command_does_not_load_the_web_application() -> None:
     code = (
-        "import sys; import {{ package }}.worker; "
-        "banned = {'connexion', 'starlette', '{{ package }}.main', '{{ package }}.generated'}; "
+        "import sys; import {{ package }}.__main__, {{ package }}.worker; "
+        "banned = {'uvicorn', 'connexion', 'starlette', '{{ package }}.main', "
+        "'{{ package }}.generated'}; "
         "loaded = banned & set(sys.modules); "
         "sys.exit(f'loaded {loaded}' if loaded else 0)"
     )

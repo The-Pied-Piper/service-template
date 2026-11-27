@@ -21,7 +21,10 @@ revision; point `app/main.py` at `build_wiring` as the new template's `main.py` 
 `build_adapters` now takes the wiring instead of the engine); update the `layers`,
 `core-framework-free` and `main-wires-concretes-only` contracts and add `worker-is-web-free` in
 `pyproject.toml`; and replace the `prod` section of your Dockerfile as in the template's.
-If your `prod` stage adds the Lambda Web Adapter, keep that in `prod` only.
+If your `prod` stage adds the Lambda Web Adapter, keep that in `prod` only; anything else you added
+to `prod` that the job runner needs too (system packages, `ENV`) moves up to `runtime`. Add
+`requirements-lambda.in` and `.txt` if you want the `jobs-lambda` target. Later fixes to the job
+code are not delivered by `upgrade` (it is service-owned like the rest of `app/`): each is listed here.
 
 ## v0.1.0
 

@@ -117,6 +117,6 @@ def _parse_field(text: str, name: str, low: int, high: int) -> frozenset[int]:
 
 
 def _number(text: str, name: str, whole: str) -> int:
-    if not text.isascii() or not text.isdigit():
+    if not text.isascii() or not text.isdigit() or len(text) > 4:
         raise InvalidScheduleError(f"{name} {whole!r}: {text!r} is not a number")
     return int(text)

@@ -82,6 +82,8 @@ def test_init_writes_expected_layout(project: Path) -> None:
         "tests/test_app.py",
         "tests/test_schedule.py",
         "tests/test_jobs.py",
+        "tests/test_job_runner.py",
+        "tests/test_job_run_store.py",
     ):
         assert (project / rel).exists(), rel
     assert "# widget-service" in (project / "README.md").read_text()
@@ -291,7 +293,7 @@ def test_readme_names_the_template_address_only_when_given(tmp_path: Path) -> No
 # `exhaustive`) and the matching plant stops failing, which fails the test below.
 CORE_FORBIDDEN = (
     "connexion pydantic pydantic_core pydantic_settings sqlalchemy asyncpg alembic httpx "
-    "fastapi jsonschema starlette app.generated app.settings"
+    "fastapi jsonschema starlette asyncio app.generated app.settings"
 ).split()
 OUTBOUND_FORBIDDEN = "connexion fastapi jsonschema pydantic starlette app.generated".split()
 INBOUND_FORBIDDEN = "sqlalchemy asyncpg alembic app.settings".split()
@@ -368,10 +370,11 @@ PLANTED_VIOLATIONS = [
     # The job runner never loads the web stack, even through another module.
     *[("worker-is-web-free", "app/worker.py", f"import {m}") for m in WORKER_FORBIDDEN],
     ("worker-is-web-free", "app/wiring.py", "import connexion"),
-    # No event loop below the composition roots: the application and domain stay synchronous
-    # in what they import, and the adapters own the loop.
-    ("core-framework-free", "app/domain/plant.py", "import asyncio"),
-    ("core-framework-free", "app/application/services/plant.py", "import asyncio"),
+    ("wiring-builds-no-inbound-adapters", "app/wiring.py", "import app.adapters.inbound.jobs_cli"),
+    *[("main-wires-concretes-only", "app/__main__.py", f"import {m}") for m in MAIN_FORBIDDEN],
+    ("layers", "app/wiring.py", "import app.__main__"),
+    # No event loop below the adapters (the CORE_FORBIDDEN plants cover the domain).
+    ("core-framework-free", "app/application/ports/plant.py", "import asyncio"),
 ]
 
 

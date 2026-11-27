@@ -147,8 +147,8 @@ new tag appeared it tells you to wire the adapter into `app/main.py`.
 | --- | --- | --- | --- |
 | `app/generated/**` | generator | overwritten | overwritten (via sync) |
 | `app/adapters/inbound/*_adapter.py`, `app/application/ports/*_port.py`, `app/application/services/*_service.py` | you (scaffolded once) | created if missing | untouched |
-| `app/main.py`, `app/worker.py`, `app/wiring.py`, `app/__main__.py`, `app/settings.py`, `app/adapters/inbound/http_errors.py`, `app/adapters/inbound/jobs_*.py`, `app/domain/**`, `app/adapters/outbound/**`, `app/application/ports/{clock,health,job_runner,job_runs}.py`, `app/application/services/{job_registry,run_due_jobs}.py`, `tests/**`, `README.md` | you (written by `init`) | untouched | untouched |
-| `Dockerfile`, `compose.yaml`, the root `requirements*.in` and `requirements*.txt`, `pyproject.toml`, `alembic.ini`, `migrations/` | you (shipped plain) | untouched | untouched |
+| `app/main.py`, `app/worker.py`, `app/wiring.py`, `app/__main__.py`, `app/settings.py`, `app/adapters/inbound/http_errors.py`, `app/adapters/inbound/jobs_*.py`, `app/domain/**`, `app/adapters/outbound/**`, `app/application/ports/*.py`, `app/application/services/{job_registry,run_due_jobs}.py`, `tests/**`, `README.md` | you (written by `init`) | untouched | untouched |
+| `Dockerfile`, `compose.yaml`, the root `requirements*.in` and `requirements*.txt`, `pyproject.toml`, `alembic.ini`, `migrations/` | you (shipped plain; `init` adds the `job_runs` migration) | untouched | untouched |
 | `dev.sh`, `scripts/`, `tools/service_gen/`, `.github/workflows/ci.yml` | template | untouched | **replaced** |
 | `service_scripts/` (the service's own `./dev.sh` commands) | you (shipped with a README) | untouched | untouched |
 
@@ -162,7 +162,7 @@ jobs**, runs whatever is due. Something outside the service fires that command o
 
 ```sh
 ./dev.sh run-due-jobs              # the same as: python -m app run-due-jobs
-python -m app serve                # the HTTP server (the image's default command)
+python -m app serve                # the HTTP server (the same as the image's default uvicorn command)
 ```
 
 **Register a job** in `register_jobs` in `app/wiring.py`. A job is an async function with no
@@ -173,20 +173,23 @@ registry.register("purge-old-messages", "0 0 * * *", purge_service.run)
 ```
 
 The schedule is five-field cron in UTC: `*`, lists, ranges and steps, numbers only; day of week
-is 0-6 with 0 as Sunday. A bad schedule or a duplicate name raises when the service starts,
-not at midnight.
+is 0-6 with 0 as Sunday. A bad schedule or a duplicate name raises when the job runner builds its
+list, so the generated tests (which build it without a database) fail in CI instead of at midnight.
 
 **What happens on each run.** For every job: read its row in `job_runs`; it is due when it
 never ran, or when its schedule has fired since it last started, so a tick that was missed is
 picked up by the next one. A due job is claimed with one atomic database write (it succeeds
 only if nobody else started the job since the row was read), run, and marked finished with
 its error text if it raised. Two overlapping ticks never run a job twice. A run that has been
-going for more than an hour is taken as crashed and its lock is ignored. One job failing never
-stops the others; the command exits 1 if any failed. A failed job is not retried until its next
-scheduled time.
+going for more than an hour is taken as crashed and its lock is ignored, so keep every job
+shorter than that (a job that outlives it is started again by a later tick, and the first run's
+late finish is ignored). One job failing never stops the others; the command exits 1 if any
+failed. A failed job is not retried until its next scheduled time.
 
-Trigger the command at least as often as your finest schedule. Once a day at midnight UTC is
-enough for daily and slower jobs.
+Extra ticks cost nothing, because a job that is not due is skipped. Trigger the command more often
+than your finest schedule, for example hourly, or a few minutes past the fire time: a tick that
+lands a second early (the runner's own clock decides) skips the job until the next tick. If the
+trigger dies partway through the list, the jobs not reached run at the next tick.
 
 **Layout.** The "is it due" rule and cron parsing are in the domain (`schedule.py`,
 `job_run.py`). The application has the registry and the `RunDueJobs` service, which talks only to
@@ -202,8 +205,9 @@ as an AWS Lambda container image (handler `app.worker.handler`, via the Runtime 
 Client). Both are built from the stage before `prod`, so a Lambda Web Adapter you add to `prod`
 is not in them. That matters because the adapter waits for a web server on its port before it
 serves anything, so a job invocation cannot share the web image. A handler failure means a job
-raised, so Lambda's error metric shows it. Use the same database settings as the web service, and
-set the async retry attempts to 0 (a retry finds nothing due).
+raised, so Lambda's error metric shows it. Use the same database settings as the web service. The
+`jobs-lambda` target's pins are in `requirements-lambda.txt`. Anything you add to `prod` that the
+job runner also needs (system packages, `ENV`) belongs in the `runtime` stage instead.
 
 An existing service adopts this by hand: see "Unreleased" in `CHANGELOG.md`.
 

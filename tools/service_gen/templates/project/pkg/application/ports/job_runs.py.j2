@@ -28,6 +28,10 @@ class JobRunStore(Protocol):
         whose lock went stale)."""
         ...
 
-    async def finish(self, name: str, *, finished_at: datetime, error: str | None) -> None:
-        """Mark the job finished: clears the running lock and keeps the error text, if any."""
+    async def finish(
+        self, name: str, *, started_at: datetime, finished_at: datetime, error: str | None
+    ) -> None:
+        """Mark the run that was claimed at `started_at` finished: clears the running lock and
+        keeps the error text, if any. Does nothing if a later run has claimed the job since (this
+        run outlived its lock), so a late finish never clears the newer run's lock."""
         ...
