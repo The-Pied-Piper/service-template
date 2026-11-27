@@ -9,9 +9,14 @@ from pathlib import Path
 import pytest
 
 from {{ package }}.adapters.inbound.jobs_cli import run_due_jobs_command
-from {{ package }}.adapters.inbound.jobs_lambda import JobsFailedError, run_due_jobs_event
+from {{ package }}.adapters.inbound.jobs_lambda import run_due_jobs_event
 from {{ package }}.adapters.outbound.db import Base, create_engine
-from {{ package }}.application.ports.job_runner import JobResult, JobStatus, RunReport
+from {{ package }}.application.ports.job_runner import (
+    JobResult,
+    JobsFailedError,
+    JobStatus,
+    RunReport,
+)
 from {{ package }}.settings import Settings
 from {{ package }}.worker import handler
 

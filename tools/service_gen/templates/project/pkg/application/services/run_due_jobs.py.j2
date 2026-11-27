@@ -19,7 +19,7 @@ from {{ package }}.domain.job_run import is_due
 
 logger = logging.getLogger(__name__)
 
-# Error text is kept for whoever looks at the job later; the cap stops one message bloating a row.
+# Error text is kept for whoever looks at the job later, cut to a fixed length.
 _MAX_ERROR_LENGTH = 2000
 
 # A run that started this long ago and never finished is taken as crashed, so its lock is ignored.
@@ -63,8 +63,7 @@ class RunDueJobs:
             await job.task()
         except Exception as exc:  # one job failing must not stop the others
             logger.exception("scheduled job %s failed", job.name)
-            # Postgres text cannot hold a NUL character; keep the message storable.
-            error = f"{type(exc).__name__}: {exc}".replace("\x00", "")[:_MAX_ERROR_LENGTH]
+            error = f"{type(exc).__name__}: {exc}"[:_MAX_ERROR_LENGTH]
         try:
             await self._store.finish(
                 job.name, started_at=now, finished_at=self._clock.now(), error=error

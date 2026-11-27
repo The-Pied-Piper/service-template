@@ -76,5 +76,10 @@ class SqlJobRunStore:
             await session.execute(
                 update(JobRunRow)
                 .where(JobRunRow.name == name, JobRunRow.last_started_at == started_at)
-                .values(running_since=None, last_finished_at=finished_at, last_error=error)
+                .values(
+                    running_since=None,
+                    last_finished_at=finished_at,
+                    # Postgres text cannot hold a NUL character.
+                    last_error=error.replace("\x00", "") if error is not None else None,
+                )
             )

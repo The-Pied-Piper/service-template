@@ -170,19 +170,6 @@ async def test_a_store_failure_when_finishing_does_not_stop_the_other_jobs() -> 
     assert after.calls == 1
 
 
-async def test_a_nul_character_in_an_error_message_is_dropped() -> None:
-    async def broken() -> None:
-        raise ValueError("a\x00b")
-
-    registry = JobRegistry()
-    registry.register("broken", "0 0 * * *", broken)
-    runner = RunDueJobs(registry, FakeStore(), FakeClock(MIDNIGHT))
-
-    report = await runner.run_due_jobs()
-
-    assert report.results[0].error == "ValueError: ab"
-
-
 async def test_a_failed_job_waits_for_its_next_scheduled_time() -> None:
     calls = 0
 
