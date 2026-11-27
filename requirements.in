@@ -2,5 +2,5 @@ alembic>=1.13
 asyncpg>=0.29
 connexion[swagger-ui,uvicorn]>=3.1
 pydantic>=2.8
-pydantic-settings>=2.4
+pydantic-settings>=2.16.3
 sqlalchemy[asyncio]>=2.1.9
