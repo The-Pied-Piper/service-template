@@ -75,6 +75,7 @@ def test_init_writes_expected_layout(project: Path) -> None:
         "app/adapters/outbound/clock.py",
         "app/adapters/inbound/cron.py",
         "app/application/ports/jobs.py",
+        "app/adapters/inbound/jobs.py",
         "app/adapters/inbound/jobs_cli.py",
         "app/adapters/inbound/jobs_lambda.py",
         "app/wiring.py",
@@ -375,6 +376,11 @@ PLANTED_VIOLATIONS = [
     ("wiring-builds-no-inbound-adapters", "app/wiring.py", "import app.adapters.inbound.jobs_cli"),
     *[("main-wires-concretes-only", "app/__main__.py", f"import {m}") for m in MAIN_FORBIDDEN],
     ("layers", "app/wiring.py", "import app.__main__"),
+    (
+        "jobs-come-from-inbound-adapters",
+        "app/adapters/outbound/plant.py",
+        "import app.application.ports.jobs",
+    ),
     # No event loop below the adapters (the CORE_FORBIDDEN plants cover the domain).
     ("core-framework-free", "app/application/ports/plant.py", "import asyncio"),
 ]

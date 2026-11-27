@@ -29,7 +29,17 @@ class Schedule:
     day_of_week_restricted: bool
 
     def __post_init__(self) -> None:
-        """A schedule must fire sometime (`0 0 31 2 *` never does)."""
+        """Every set holds values within its field's bounds, and the schedule fires sometime
+        (`0 0 31 2 *` never does)."""
+        for name, values, low, high in (
+            ("minutes", self.minutes, 0, 59),
+            ("hours", self.hours, 0, 23),
+            ("days of month", self.days_of_month, 1, 31),
+            ("months", self.months, 1, 12),
+            ("days of week", self.days_of_week, 0, 6),
+        ):
+            if not values or not all(low <= value <= high for value in values):
+                raise InvalidScheduleError(f"{name} must be a non-empty set within {low}-{high}")
         self.next_after(_EPOCH)
 
     def next_after(self, moment: datetime) -> datetime:

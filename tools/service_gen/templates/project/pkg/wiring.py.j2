@@ -13,9 +13,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from {{ package }}.adapters.outbound.clock import SystemClock
-from {{ package }}.adapters.outbound.db import SqlJobRunStore, create_engine, create_session_factory
-from {{ package }}.application.services.job_registry import JobRegistry
-from {{ package }}.application.services.run_due_jobs import RunDueJobs
+from {{ package }}.adapters.outbound.db import create_engine, create_session_factory
 from {{ package }}.settings import Settings
 
 
@@ -36,7 +34,3 @@ def build_wiring(settings: Settings) -> Wiring:
         session_factory=create_session_factory(engine),
         clock=SystemClock(),
     )
-
-
-def build_job_runner(wiring: Wiring, registry: JobRegistry) -> RunDueJobs:
-    return RunDueJobs(registry, SqlJobRunStore(wiring.session_factory), wiring.clock)

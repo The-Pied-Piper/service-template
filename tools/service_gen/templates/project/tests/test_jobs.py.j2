@@ -254,9 +254,13 @@ def test_the_services_registered_jobs_have_valid_schedules_and_unique_names() ->
     """Needs no database: building the job list must not fail."""
     from {{ package }}.settings import Settings
     from {{ package }}.wiring import build_wiring
-    from {{ package }}.worker import register_jobs
+    from {{ package }}.worker import build_job_adapters
 
-    register_jobs(JobRegistry(), build_wiring(Settings()))
+    settings = Settings()
+    registry = JobRegistry()
+    for adapter in build_job_adapters(settings, build_wiring(settings)):
+        for job in adapter.jobs():
+            registry.register(job)
 
 
 def test_registering_refuses_a_duplicate_name() -> None:

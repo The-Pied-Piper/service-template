@@ -36,6 +36,7 @@ PROJECT_FILES: tuple[tuple[str, str], ...] = (
     ("project/pkg/adapters/inbound/__init__.py.j2", "{pkg}/adapters/inbound/__init__.py"),
     ("project/pkg/adapters/inbound/cron.py.j2", "{pkg}/adapters/inbound/cron.py"),
     ("project/pkg/adapters/inbound/http_errors.py.j2", "{pkg}/adapters/inbound/http_errors.py"),
+    ("project/pkg/adapters/inbound/jobs.py.j2", "{pkg}/adapters/inbound/jobs.py"),
     ("project/pkg/adapters/inbound/jobs_cli.py.j2", "{pkg}/adapters/inbound/jobs_cli.py"),
     ("project/pkg/adapters/inbound/jobs_lambda.py.j2", "{pkg}/adapters/inbound/jobs_lambda.py"),
     ("project/pkg/adapters/outbound/__init__.py.j2", "{pkg}/adapters/outbound/__init__.py"),

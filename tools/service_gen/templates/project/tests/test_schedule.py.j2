@@ -97,3 +97,28 @@ def test_due_once_the_schedule_has_fired_since_the_last_start() -> None:
 def test_a_missed_tick_is_picked_up_by_the_next_one() -> None:
     schedule = parse_cron("0 0 * * *")
     assert is_due(schedule, at("2026-11-24T00:00:05"), at("2026-11-27T00:00:03"))
+
+
+def test_a_schedule_built_directly_keeps_its_bounds() -> None:
+    from {{ package }}.domain.schedule import Schedule
+
+    ok = {
+        "minutes": frozenset({0}),
+        "hours": frozenset({0}),
+        "days_of_month": frozenset({1}),
+        "months": frozenset({1}),
+        "days_of_week": frozenset({0}),
+        "day_of_month_restricted": False,
+        "day_of_week_restricted": False,
+    }
+    Schedule(**ok)  # type: ignore[arg-type]
+    for field, bad in (
+        ("minutes", frozenset({0, 99})),
+        ("hours", frozenset({24})),
+        ("days_of_month", frozenset({0})),
+        ("months", frozenset({13})),
+        ("days_of_week", frozenset({7})),
+        ("minutes", frozenset()),
+    ):
+        with pytest.raises(InvalidScheduleError):
+            Schedule(**{**ok, field: bad})  # type: ignore[arg-type]

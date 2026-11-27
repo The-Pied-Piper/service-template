@@ -92,7 +92,7 @@ failures; `{{ package }}/adapters/inbound/http_errors.py` maps them to RFC 7807 
 
 Declare a job in an inbound job adapter that calls a port your service implements, with its
 schedule written as a five-field cron string in UTC (`parse_cron("0 0 * * *")`, from
-`{{ package }}/adapters/inbound/cron.py`), and register the adapter's jobs in `register_jobs()` in
+`{{ package }}/adapters/inbound/cron.py`), and return the adapter from `build_job_adapters()` in
 `{{ package }}/worker.py`. `./dev.sh run-due-jobs` runs whatever is due, once; in production something
 outside the service fires `python -m {{ package }} run-due-jobs` (the `jobs` image target) or the
 Lambda handler `{{ package }}.worker.handler` (`jobs-lambda`) on a clock, for example at midnight

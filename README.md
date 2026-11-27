@@ -147,7 +147,7 @@ new tag appeared it tells you to wire the adapter into `app/main.py`.
 | --- | --- | --- | --- |
 | `app/generated/**` | generator | overwritten | overwritten (via sync) |
 | `app/adapters/inbound/*_adapter.py`, `app/application/ports/*_port.py`, `app/application/services/*_service.py` | you (scaffolded once) | created if missing | untouched |
-| `app/main.py`, `app/worker.py`, `app/wiring.py`, `app/__main__.py`, `app/settings.py`, `app/adapters/inbound/http_errors.py`, `app/adapters/inbound/{cron,jobs_*}.py`, `app/domain/**`, `app/adapters/outbound/**`, `app/application/ports/*.py`, `app/application/services/{job_registry,run_due_jobs}.py`, `tests/**`, `README.md` | you (written by `init`) | untouched | untouched |
+| `app/main.py`, `app/worker.py`, `app/wiring.py`, `app/__main__.py`, `app/settings.py`, `app/adapters/inbound/http_errors.py`, `app/adapters/inbound/{cron,jobs,jobs_*}.py`, `app/domain/**`, `app/adapters/outbound/**`, `app/application/ports/*.py`, `app/application/services/{job_registry,run_due_jobs}.py`, `tests/**`, `README.md` | you (written by `init`) | untouched | untouched |
 | `Dockerfile`, `compose.yaml`, the root `requirements*.in` and `requirements*.txt`, `pyproject.toml`, `alembic.ini`, `migrations/` | you (shipped plain; `init` adds the `job_runs` migration) | untouched | untouched |
 | `dev.sh`, `scripts/`, `tools/service_gen/`, `.github/workflows/ci.yml` | template | untouched | **replaced** |
 | `service_scripts/` (the service's own `./dev.sh` commands) | you (shipped with a README) | untouched | untouched |
@@ -168,11 +168,17 @@ python -m app serve                # the HTTP server (the same as the image's de
 **Declare a job** the way you declare an endpoint: an inbound **job adapter** declares it and calls
 a **port** that your service implements. The adapter turns the cron text into a domain schedule
 with `parse_cron` (`app/adapters/inbound/cron.py`), as a request adapter turns a DTO into a domain
-object. Then register the adapter's jobs in `register_jobs` in `app/worker.py`, like
-`build_adapters()` in `main.py` for requests. The template ships no jobs.
+object. Then return the adapter from `build_job_adapters()` in `app/worker.py`, like
+`build_adapters()` in `main.py` for requests. Name the adapter `adapters/inbound/<name>_jobs.py`
+and its port `application/ports/<name>_port.py`, next to the request adapters and their ports. The
+template ships no jobs.
 
 ```python
-class PurgeJobsAdapter:
+from app.adapters.inbound.cron import parse_cron
+from app.application.ports.jobs import Job
+
+
+class PurgeJobsAdapter:  # PurgePort is your own port, implemented by your service
     def __init__(self, service: PurgePort) -> None:
         self._service = service
 
@@ -183,9 +189,8 @@ class PurgeJobsAdapter:
         await self._service.purge_old()
 
 
-# in register_jobs(registry, wiring):
-for job in PurgeJobsAdapter(wiring.purge_service).jobs():
-    registry.register(job)
+# in build_job_adapters(settings, wiring) in app/worker.py:
+return (PurgeJobsAdapter(PurgeService(PurgeRepository(wiring.session_factory))),)
 ```
 
 The schedule is five-field cron in UTC: `*`, lists, ranges and steps, numbers only; day of week

@@ -1,0 +1,19 @@
+"""The shape of a job adapter, so the job runner root can hold them as one typed list.
+
+A job adapter is an inbound adapter, like a request adapter: it takes a port the service
+implements, declares its jobs (a name, a schedule from `parse_cron`, and a method that calls the
+port), and `worker.py` collects them. The generated `Adapters` dataclass plays this part for
+request adapters.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from {{ package }}.application.ports.jobs import Job
+
+
+class JobAdapter(Protocol):
+    def jobs(self) -> tuple[Job, ...]:
+        """The jobs this adapter declares."""
+        ...

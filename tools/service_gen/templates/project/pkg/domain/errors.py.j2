@@ -21,7 +21,7 @@ class ValidationError(DomainError):
 
 
 class InvalidScheduleError(ValidationError):
-    """A cron expression that cannot be read, or that never fires."""
+    """A schedule that is out of bounds or never fires, or declared in text that cannot be read."""
 
 
 class DuplicateJobError(ConflictError):

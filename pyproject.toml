@@ -197,3 +197,10 @@ name = "Shared wiring builds no inbound adapter: each root picks its own"
 type = "forbidden"
 source_modules = ["app.wiring"]
 forbidden_modules = ["app.adapters.inbound"]
+
+[[tool.importlinter.contracts]]
+id = "jobs-come-from-inbound-adapters"
+name = "Only inbound adapters build jobs: outbound adapters never import the job vocabulary"
+type = "forbidden"
+source_modules = ["app.adapters.outbound"]
+forbidden_modules = ["app.application.ports.jobs"]

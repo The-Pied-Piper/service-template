@@ -12,37 +12,40 @@ import asyncio
 import logging
 import sys
 
+from {{ package }}.adapters.inbound.jobs import JobAdapter
 from {{ package }}.adapters.inbound.jobs_cli import run_due_jobs_command
 from {{ package }}.adapters.inbound.jobs_lambda import run_due_jobs_event
+from {{ package }}.adapters.outbound.db import SqlJobRunStore
 from {{ package }}.application.services.job_registry import JobRegistry
 from {{ package }}.application.services.run_due_jobs import RunDueJobs
 from {{ package }}.settings import Settings
-from {{ package }}.wiring import Wiring, build_job_runner, build_wiring
+from {{ package }}.wiring import Wiring, build_wiring
 
 
-def register_jobs(registry: JobRegistry, wiring: Wiring) -> None:
-    """Register this service's scheduled jobs. The template ships none.
+def build_job_adapters(settings: Settings, wiring: Wiring) -> tuple[JobAdapter, ...]:
+    """Construct services -> inbound job adapters, as `build_adapters()` does in `main.py`.
 
-    Like `build_adapters()` in `main.py` for requests: build each job adapter from the services
-    on `wiring` and register what it declares. A job adapter is an inbound adapter that calls a
-    port the service implements, and declares its jobs with `parse_cron` (see the README):
+    The template ships none. A service builds each job adapter here from the repositories on
+    `wiring` (a service that only jobs use is built here too; put on `Wiring` only what both
+    roots share) and returns it with the others:
 
-        for adapter in (PurgeJobsAdapter(wiring.purge_service),):
-            for job in adapter.jobs():
-                registry.register(job)
+        return (PurgeJobsAdapter(PurgeService(PurgeRepository(wiring.session_factory))),)
     """
+    return ()
 
 
-def _build_runner(wiring: Wiring) -> RunDueJobs:
+def _build_runner(settings: Settings, wiring: Wiring) -> RunDueJobs:
     registry = JobRegistry()
-    register_jobs(registry, wiring)
-    return build_job_runner(wiring, registry)
+    for adapter in build_job_adapters(settings, wiring):
+        for job in adapter.jobs():
+            registry.register(job)
+    return RunDueJobs(registry, SqlJobRunStore(wiring.session_factory), wiring.clock)
 
 
 async def _run_cli(settings: Settings) -> int:
     wiring = build_wiring(settings)
     try:
-        return await run_due_jobs_command(_build_runner(wiring), sys.stdout)
+        return await run_due_jobs_command(_build_runner(settings, wiring), sys.stdout)
     finally:
         await wiring.dispose()
 
@@ -50,7 +53,7 @@ async def _run_cli(settings: Settings) -> int:
 async def _run_event(settings: Settings) -> dict[str, list[str]]:
     wiring = build_wiring(settings)
     try:
-        return await run_due_jobs_event(_build_runner(wiring))
+        return await run_due_jobs_event(_build_runner(settings, wiring))
     finally:
         await wiring.dispose()
 
