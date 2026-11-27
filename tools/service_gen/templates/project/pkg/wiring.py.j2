@@ -1,0 +1,36 @@
+"""Shared wiring: what the HTTP server (`main.py`) and the job runner (`worker.py`) both build.
+
+There are two composition roots, one for each way the service is started, and both take their
+database engine, clock and repositories from here, so a job and an endpoint use the same
+repository code. Like `main.py`, this module imports concretes only; put a repository or service
+that both a request and a job need on `Wiring`.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from {{ package }}.adapters.outbound.clock import SystemClock
+from {{ package }}.adapters.outbound.db import create_engine, create_session_factory
+from {{ package }}.settings import Settings
+
+
+@dataclass(frozen=True)
+class Wiring:
+    engine: AsyncEngine
+    session_factory: async_sessionmaker[AsyncSession]
+    clock: SystemClock
+
+    async def dispose(self) -> None:
+        await self.engine.dispose()
+
+
+def build_wiring(settings: Settings) -> Wiring:
+    engine = create_engine(settings)
+    return Wiring(
+        engine=engine,
+        session_factory=create_session_factory(engine),
+        clock=SystemClock(),
+    )

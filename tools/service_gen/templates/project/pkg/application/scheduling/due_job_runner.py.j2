@@ -1,0 +1,92 @@
+"""Runs the scheduled jobs that are due. Implements the `JobRunner` port.
+
+Something outside the service ticks this (the command line, for example), every day or more
+often; this decides what is due. Each job is read, checked against its schedule, claimed with
+one atomic write, run, and marked finished. A job that raises is recorded as failed and the
+others still run. The runner sees tasks only through `ScheduledTask`, never the services
+behind them.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections import Counter
+from collections.abc import Iterable
+
+from {{ package }}.application.ports.clock import Clock
+from {{ package }}.application.ports.job_runner import JobResult, JobStatus, RunReport
+from {{ package }}.application.ports.job_runs import JobRunStore
+from {{ package }}.application.scheduling.task import ScheduledJob
+from {{ package }}.domain.job_run import is_due
+
+logger = logging.getLogger(__name__)
+
+# Error text is kept for whoever looks at the job later, cut to a fixed length.
+_MAX_ERROR_LENGTH = 2000
+
+
+class DuplicateJobError(ValueError):
+    """Two jobs were given the same name. A mistake in the composition root, not a business rule."""
+
+
+class DueJobRunner:
+    def __init__(
+        self,
+        jobs: Iterable[ScheduledJob],
+        store: JobRunStore,
+        clock: Clock,
+    ) -> None:
+        self._jobs = tuple(jobs)
+        counts = Counter(job.name for job in self._jobs)
+        duplicates = sorted(name for name, count in counts.items() if count > 1)
+        if duplicates:
+            raise DuplicateJobError(f"more than one scheduled job is named {duplicates[0]!r}")
+        self._store = store
+        self._clock = clock
+
+    async def run_due_jobs(self) -> RunReport:
+        return RunReport(tuple([await self._run_one(job) for job in self._jobs]))
+
+    async def _run_one(self, job: ScheduledJob) -> JobResult:
+        now = self._clock.now()
+        try:
+            record = await self._store.get(job.name)
+        except Exception as exc:  # the store is down: report this job, the others may still work
+            return self._not_started(job, exc)
+        seen = record.last_started_at if record else None
+        if not is_due(job.schedule, seen, now):
+            return JobResult(job.name, JobStatus.NOT_DUE)
+        try:
+            claimed = await self._store.claim(
+                job.name,
+                seen_last_started_at=seen,
+                now=now,
+                locked_since_before=now - job.stale_after,
+            )
+        except Exception as exc:
+            return self._not_started(job, exc)
+        if not claimed:
+            return JobResult(job.name, JobStatus.CLAIMED_ELSEWHERE)
+
+        error: str | None = None
+        try:
+            await job.task.run()
+        except Exception as exc:  # one job failing must not stop the others
+            logger.exception("scheduled job %s failed", job.name)
+            error = _describe(exc)
+        try:
+            await self._store.finish(
+                job.name, started_at=now, finished_at=self._clock.now(), error=error
+            )
+        except Exception:  # the lock goes stale by itself; the other jobs still run
+            logger.exception("could not record the end of scheduled job %s", job.name)
+        return JobResult(job.name, JobStatus.FAILED if error else JobStatus.RAN, error)
+
+    @staticmethod
+    def _not_started(job: ScheduledJob, exc: Exception) -> JobResult:
+        logger.error("could not start scheduled job %s", job.name, exc_info=exc)
+        return JobResult(job.name, JobStatus.FAILED, _describe(exc))
+
+
+def _describe(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"[:_MAX_ERROR_LENGTH]

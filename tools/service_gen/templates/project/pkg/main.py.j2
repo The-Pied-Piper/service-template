@@ -1,7 +1,8 @@
-"""Composition root: builds services, wires them into request adapters, and creates the ASGI app.
+"""Composition root for the HTTP server: wires services into adapters and creates the ASGI app.
 
-This is the only place that knows about concrete implementations. Swap outbound
-adapters (databases, clients) here, never inside the domain or application layers.
+Together with `worker.py` (the job runner) and the shared `wiring.py`, this is where concrete
+implementations are chosen. Swap outbound adapters (databases, clients) there, never inside the
+domain or application layers.
 """
 
 from __future__ import annotations
@@ -14,32 +15,34 @@ from typing import Any
 
 from connexion import AsyncApp
 from connexion.resolver import Resolver
-from sqlalchemy.ext.asyncio import AsyncEngine
 
 from {{ package }}.adapters.inbound import http_errors
 {% for tag in spec.tags %}
 from {{ package }}.adapters.inbound.{{ tag.snake }}_adapter import {{ tag.pascal }}RequestAdapter
 {% endfor %}
-from {{ package }}.adapters.outbound.db import {% if spec.has_health_tag %}DatabaseProbe, {% endif %}create_engine
+{% if spec.has_health_tag %}
+from {{ package }}.adapters.outbound.db import DatabaseProbe
+{% endif %}
 {% for tag in spec.tags %}
 from {{ package }}.application.services.{{ tag.snake }}_service import {{ tag.pascal }}Service
 {% endfor %}
 from {{ package }}.generated.handlers import Adapters, build_operations
 from {{ package }}.settings import Settings
+from {{ package }}.wiring import Wiring, build_wiring
 
 SPEC_PATH = Path(__file__).resolve().parent.parent / "openapi" / "openapi.yml"
 
 
-def build_adapters(settings: Settings, engine: AsyncEngine) -> Adapters:
+def build_adapters(settings: Settings, wiring: Wiring) -> Adapters:
     """Construct outbound adapters -> services -> inbound request adapters.
 
-    Repositories take a session factory from `create_session_factory(engine)`
-    and are passed into the services they back.
+    Repositories take `wiring.session_factory` and are passed into the services they back.
+    A repository the job runner needs too belongs on `Wiring` (see `wiring.py`).
     """
 {% if spec.has_health_tag %}
     # The layer rules keep ports out of main, so for more probes pass them inline or as a
     # tuple; a `list[ReadinessProbe]` annotation would import the port.
-    probes = [DatabaseProbe(engine)]
+    probes = [DatabaseProbe(wiring.engine)]
 {% endif %}
     return Adapters(
 {% for tag in spec.tags %}
@@ -55,14 +58,14 @@ def build_adapters(settings: Settings, engine: AsyncEngine) -> Adapters:
 def create_app(settings: Settings | None = None) -> AsyncApp:
     settings = settings or Settings()
     logging.basicConfig(level=settings.log_level)
-    engine = create_engine(settings)
+    wiring = build_wiring(settings)
 
     @asynccontextmanager
     async def lifespan(_: Any) -> AsyncIterator[None]:
         yield
-        await engine.dispose()
+        await wiring.dispose()
 
-    operations = build_operations(build_adapters(settings, engine))
+    operations = build_operations(build_adapters(settings, wiring))
     app = AsyncApp(__name__, lifespan=lifespan)
     app.add_api(
         SPEC_PATH,

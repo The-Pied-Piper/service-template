@@ -64,7 +64,27 @@ def test_init_writes_expected_layout(project: Path) -> None:
         "app/application/ports/health.py",
         "app/adapters/outbound/db/health.py",
         "app/domain/errors.py",
+        "app/domain/schedule.py",
+        "app/domain/job_run.py",
+        "app/application/ports/job_runs.py",
+        "app/application/ports/job_runner.py",
+        "app/application/ports/clock.py",
+        "app/application/scheduling/task.py",
+        "app/application/scheduling/due_job_runner.py",
+        "app/adapters/outbound/db/job_runs.py",
+        "app/adapters/outbound/clock.py",
+        "app/adapters/inbound/cron.py",
+        "app/adapters/inbound/jobs_cli.py",
+        "app/wiring.py",
+        "app/worker.py",
+        "app/scheduled_jobs.py",
+        "app/__main__.py",
+        "migrations/versions/20261127_0000_0001_create_job_runs.py",
         "tests/test_app.py",
+        "tests/test_schedule.py",
+        "tests/test_jobs.py",
+        "tests/test_job_runner.py",
+        "tests/test_job_run_store.py",
     ):
         assert (project / rel).exists(), rel
     assert "# widget-service" in (project / "README.md").read_text()
@@ -179,7 +199,7 @@ def test_full_request_flow(project: Path, monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(
         main_mod,
         "build_adapters",
-        lambda settings, engine: handlers.Adapters(
+        lambda settings, wiring: handlers.Adapters(
             status=status_adapter.StatusRequestAdapter(status_service.StatusService(probes)),
             widgets=PagingWidgetsAdapter(widgets_service),
         ),
@@ -274,7 +294,7 @@ def test_readme_names_the_template_address_only_when_given(tmp_path: Path) -> No
 # `exhaustive`) and the matching plant stops failing, which fails the test below.
 CORE_FORBIDDEN = (
     "connexion pydantic pydantic_core pydantic_settings sqlalchemy asyncpg alembic httpx "
-    "fastapi jsonschema starlette app.generated app.settings"
+    "fastapi jsonschema starlette asyncio app.generated app.settings"
 ).split()
 OUTBOUND_FORBIDDEN = "connexion fastapi jsonschema pydantic starlette app.generated".split()
 INBOUND_FORBIDDEN = "sqlalchemy asyncpg alembic app.settings".split()
@@ -289,7 +309,19 @@ SETTINGS_FORBIDDEN = (
     "app.domain.errors app.application.ports.health app.adapters.inbound.http_errors "
     "app.generated.models app.main"
 ).split()
+WORKER_FORBIDDEN = (
+    "connexion fastapi starlette uvicorn app.generated.handlers app.main "
+    "app.adapters.inbound.http_errors"
+).split()
+SERVER_FORBIDDEN = (
+    "app.worker app.scheduled_jobs app.application.scheduling.due_job_runner "
+    "app.adapters.inbound.jobs_cli"
+).split()
+CLI_FORBIDDEN = (
+    "connexion fastapi starlette app.generated.handlers app.main app.adapters.inbound.http_errors"
+).split()
 SERVICES = "app.application.services.status_service"
+SCHEDULING = "import app.application.scheduling.task"
 
 PLANTED_VIOLATIONS = [
     # Layers point inward, and every module is placed.
@@ -333,6 +365,57 @@ PLANTED_VIOLATIONS = [
         for m in INBOUND_FORBIDDEN
     ],
     *[("main-wires-concretes-only", "app/main.py", f"import {m}") for m in MAIN_FORBIDDEN],
+    # The two composition roots and the wiring they share.
+    *[("main-wires-concretes-only", "app/worker.py", f"import {m}") for m in MAIN_FORBIDDEN],
+    *[("main-wires-concretes-only", "app/wiring.py", f"import {m}") for m in MAIN_FORBIDDEN],
+    ("layers", "app/worker.py", "import app.main"),
+    ("layers", "app/main.py", "import app.worker"),
+    ("layers", "app/wiring.py", "import app.main"),
+    ("layers", "app/wiring.py", "import app.worker"),
+    ("layers", "app/main.py", "import app.__main__"),
+    ("layers", "app/worker.py", "import app.__main__"),
+    ("layers", "app/adapters/outbound/plant.py", "import app.wiring"),
+    ("layers", "app/adapters/inbound/plant.py", "import app.worker"),
+    # The job runner never loads the web stack, even through another module.
+    *[("worker-is-web-free", "app/worker.py", f"import {m}") for m in WORKER_FORBIDDEN],
+    ("worker-is-web-free", "app/wiring.py", "import connexion"),
+    ("worker-is-web-free", "app/scheduled_jobs.py", "import connexion"),
+    # The server never loads the job runner; the command line never loads the web stack.
+    *[("server-has-no-job-runner", "app/main.py", f"import {m}") for m in SERVER_FORBIDDEN],
+    # ... nor through a module the server reaches.
+    (
+        "server-has-no-job-runner",
+        "app/wiring.py",
+        "import app.application.scheduling.due_job_runner",
+    ),
+    (
+        "server-has-no-job-runner",
+        "app/adapters/inbound/http_errors.py",
+        "import app.adapters.inbound.jobs_cli",
+    ),
+    *[("command-line-is-web-free", "app/__main__.py", f"import {m}") for m in CLI_FORBIDDEN],
+    ("wiring-builds-no-inbound-adapters", "app/wiring.py", "import app.adapters.inbound.jobs_cli"),
+    *[("main-wires-concretes-only", "app/__main__.py", f"import {m}") for m in MAIN_FORBIDDEN],
+    ("layers", "app/wiring.py", "import app.__main__"),
+    # Adapters never reach the scheduling package, and services never reach its runner.
+    ("adapters-depend-on-ports-only", "app/adapters/inbound/plant.py", SCHEDULING),
+    ("adapters-depend-on-ports-only", "app/adapters/outbound/plant.py", SCHEDULING),
+    (
+        "services-see-the-task-contract-only",
+        "app/application/services/plant.py",
+        "import app.application.scheduling.due_job_runner",
+    ),
+    ("application-sublayers", "app/application/scheduling/plant.py", f"import {SERVICES}"),
+    ("application-sublayers", "app/application/ports/plant.py", SCHEDULING),
+    # The scheduled jobs module is part of the job runner's root.
+    *[
+        ("main-wires-concretes-only", "app/scheduled_jobs.py", f"import {m}")
+        for m in MAIN_FORBIDDEN
+    ],
+    ("layers", "app/scheduled_jobs.py", "import app.worker"),
+    ("layers", "app/wiring.py", "import app.scheduled_jobs"),
+    # No event loop below the adapters (the CORE_FORBIDDEN plants cover the domain).
+    ("core-framework-free", "app/application/ports/plant.py", "import asyncio"),
 ]
 
 

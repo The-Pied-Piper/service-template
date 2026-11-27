@@ -1,0 +1,36 @@
+"""Where the last run of each scheduled job is kept."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Protocol
+
+from {{ package }}.domain.job_run import JobRun
+
+
+class JobRunStore(Protocol):
+    async def get(self, name: str) -> JobRun | None:
+        """The record of the job, or None if it has never been started."""
+        ...
+
+    async def claim(
+        self,
+        name: str,
+        *,
+        seen_last_started_at: datetime | None,
+        now: datetime,
+        locked_since_before: datetime,
+    ) -> bool:
+        """Mark the job started, as one atomic step. Returns False, changing nothing, unless the
+        job was last started at `seen_last_started_at` (nobody else started it since it was read)
+        and is not running, or has been running since before `locked_since_before` (a crashed run
+        whose lock went stale)."""
+        ...
+
+    async def finish(
+        self, name: str, *, started_at: datetime, finished_at: datetime, error: str | None
+    ) -> None:
+        """Mark the run that was claimed at `started_at` finished: clears the running lock and
+        keeps the error text, if any. Does nothing if a later run has claimed the job since (this
+        run outlived its lock), so a late finish never clears the newer run's lock."""
+        ...

@@ -147,10 +147,116 @@ new tag appeared it tells you to wire the adapter into `app/main.py`.
 | --- | --- | --- | --- |
 | `app/generated/**` | generator | overwritten | overwritten (via sync) |
 | `app/adapters/inbound/*_adapter.py`, `app/application/ports/*_port.py`, `app/application/services/*_service.py` | you (scaffolded once) | created if missing | untouched |
-| `app/main.py`, `app/settings.py`, `app/adapters/inbound/http_errors.py`, `app/domain/**`, `app/adapters/outbound/**`, `tests/**`, `README.md` | you (written by `init`) | untouched | untouched |
-| `Dockerfile`, `compose.yaml`, the root `requirements*.in` and `requirements*.txt`, `pyproject.toml`, `alembic.ini`, `migrations/` | you (shipped plain) | untouched | untouched |
+| `app/main.py`, `app/worker.py`, `app/scheduled_jobs.py`, `app/wiring.py`, `app/__main__.py`, `app/settings.py`, `app/adapters/inbound/http_errors.py`, `app/adapters/inbound/{cron,jobs_*}.py`, `app/domain/**`, `app/adapters/outbound/**`, `app/application/ports/{clock,health,job_runner,job_runs}.py`, `app/application/scheduling/*.py`, `tests/**`, `README.md` | you (written by `init`) | untouched | untouched |
+| `Dockerfile`, `compose.yaml`, the root `requirements*.in` and `requirements*.txt`, `pyproject.toml`, `alembic.ini`, `migrations/` | you (shipped plain; `init` adds the `job_runs` migration) | untouched | untouched |
 | `dev.sh`, `scripts/`, `tools/service_gen/`, `.github/workflows/ci.yml` | template | untouched | **replaced** |
 | `service_scripts/` (the service's own `./dev.sh` commands) | you (shipped with a README) | untouched | untouched |
+
+## Scheduled jobs
+
+A service can run work on a schedule (a nightly purge, a monthly report) without a scheduler
+of its own, and without being tied to any one cloud. It works like Django's cron
+apps: the service keeps a list of jobs, each with a cron schedule, and one command, **run due
+jobs**, runs whatever is due. Something outside the service fires that command on a clock
+(EventBridge, `cron`, a Kubernetes CronJob). Nothing is scheduled inside the process.
+
+```sh
+./dev.sh run-due-jobs              # the same as: python -m app run-due-jobs
+python -m app serve                # the HTTP server (the same as the image's default uvicorn command)
+```
+
+**Declare a job** in `app/scheduled_jobs.py`, the one file you edit. A job is a **task**, one use
+case of yours with an `async def run(self) -> None` method that knows nothing of being scheduled,
+paired there with a name and a cron schedule. Cron text is read by `parse_cron`
+(`app/adapters/inbound/cron.py`) in that file, so the domain and the application never read text.
+The template ships no jobs.
+
+```python
+# app/application/services/purge_old_messages.py: a use case of yours. MessagesPort is a port
+# your own outbound adapter implements.
+class PurgeOldMessages:
+    def __init__(self, messages: MessagesPort) -> None:
+        self._messages = messages
+
+    async def run(self) -> None:
+        await self._messages.delete_older_than_months(12)
+
+
+# app/scheduled_jobs.py, in build_scheduled_jobs(settings, wiring):
+return (
+    ScheduledJob(
+        "purge-old-messages",
+        parse_cron("0 0 * * *"),
+        PurgeOldMessages(MessageRepository(wiring.session_factory)),
+    ),
+)
+```
+
+The name is the key of the job's row in `job_runs` (one row per job, holding its last run);
+renaming it starts a new row. The runner
+asks tasks only for `run()`, through the `ScheduledTask` contract, so it never knows which
+services are behind them.
+
+The schedule is five-field cron in UTC: `*`, lists, ranges and steps, numbers only; day of week
+is 0-6 with 0 as Sunday. Text that is not cron raises `CronSyntaxError`, a schedule that never fires raises
+`InvalidScheduleError`, and a duplicate name raises `DuplicateJobError`, all when the job runner
+builds its list, so a generated test (which builds it without a database) fails in CI instead of at midnight.
+
+**What happens on each run.** For every job: read its row in `job_runs`; it is due when it
+never ran, or when its schedule has fired since it last started, so a tick that was missed is
+picked up by the next one. A due job is claimed with one atomic database write (it succeeds
+only if nobody else started the job since the row was read), run, and marked finished with
+its error text if it raised. Two overlapping ticks never run a job twice. A run that has been
+going for more than `stale_after` (an hour unless the `ScheduledJob` says otherwise) is taken as
+crashed and its lock is ignored once the job is due again, so keep every job shorter than that, or
+set a longer `stale_after` for it (a job that outlives it is started again by a later tick, and the
+first run's late finish is ignored). A killed run (a timeout, an out-of-memory kill) never
+marks its end, so it blocks the job until `stale_after` passes: set it a little above the longest
+the task really takes. One job failing never stops the others; the command exits 1 if any
+failed. A failed job is not retried until its next scheduled time.
+
+A job that has never run is due at the first tick after it is deployed (or renamed), so a new
+monthly job runs at once. Jobs run one after another in one process, so a long job delays the ones
+after it in the same tick, and under a platform time limit it can starve them: split slow work into
+separate jobs or schedules.
+
+Extra ticks cost nothing, because a job that is not due is skipped. Trigger the command more often
+than your finest schedule, for example hourly, or a few minutes past the fire time: a tick that
+lands a second early (the runner's own clock decides) skips the job until the next tick. If the
+trigger dies partway through the list, the jobs not reached run at the next tick.
+
+**Layout.** The "is it due" rule and the `Schedule` value are in the domain (`schedule.py`,
+`job_run.py`). The application has a small scheduling package, `application/scheduling`: the
+`ScheduledTask` contract and `ScheduledJob` pairing, and `DueJobRunner`, which implements the
+`JobRunner` port and talks only to ports (`JobRunStore`, `Clock`) and `ScheduledTask`. Your tasks
+implement `ScheduledTask`; the runner never imports them. `ScheduledTask` is not a port (no adapter
+calls or implements it), so it lives beside the ports, and adapters may not import it. Postgres and
+the system clock are outbound adapters. The `run-due-jobs` command is
+an inbound adapter whose only job is to call the `JobRunner` port. The cron text is read by
+`adapters/inbound/cron.py`, which the composition root calls.
+There are two composition roots, `app/main.py` (HTTP server) and `app/worker.py` (job runner,
+with `app/scheduled_jobs.py` for its jobs), and both take their engine, clock and repositories from
+the shared `app/wiring.py`. Put a repository or service that a job and an endpoint both use on
+`Wiring`.
+
+**Images.** The `prod` target is the HTTP server. The `jobs` target runs `python -m app
+run-due-jobs`, for a CronJob or a scheduled container task. It is built from the stage before
+`prod`, so anything you add to `prod` (a Lambda Web Adapter, say, which waits for a web server on
+its port) is not in it. Use the same database settings as the web service. Anything you add to
+`prod` that the job runner also needs (system packages, `ENV`) belongs in the `runtime` stage
+instead.
+
+**Triggering it another way.** The command line is the only trigger the template ships, because
+how a service is triggered is specific to where it runs. To add one (an AWS Lambda handler, say),
+write a thin inbound adapter in `adapters/inbound/` that calls the `JobRunner` port's
+`run_due_jobs()`, as `jobs_cli.py` does. Put the synchronous entry function that builds the runner
+with `build_runner(settings, wiring)` and calls the adapter in `app/worker.py`, next to
+`run_due_jobs()` (which also disposes the wiring); a new top-level module must be added to the
+`layers` and `main-wires-concretes-only` contracts. Add whatever image or dependency that trigger
+needs: for Lambda, a second image target with the Runtime Interface Client, since the Lambda Web
+Adapter waits for a web server and the web image cannot be shared.
+
+An existing service adopts this by hand: see "Unreleased" in `CHANGELOG.md`.
 
 ## Known limits
 
@@ -233,11 +339,14 @@ same image and command as locally — and builds the production image once
 The layer rules are `[tool.importlinter]` contracts in `pyproject.toml`, which the
 service owns: add contracts as it grows.
 
-- Layers point inward: `app.main`, `app.adapters`, `app.application`, `app.domain`.
+- Layers point inward: `app.__main__`, then the two composition roots `app.main` and
+  `app.worker` (which never import each other), then `app.scheduled_jobs` (the job runner's
+  jobs), then `app.wiring` (what both share),
+  `app.adapters`, `app.application`, `app.domain`.
   Any other module under `app/` must be added to the layers (`app.generated` and
   `app.settings` are exempt), so a new module cannot slip in unchecked.
 - The domain and application import none of Connexion, FastAPI, Starlette, httpx,
-  jsonschema, Pydantic, SQLAlchemy, asyncpg, Alembic, `app.generated` or
+  jsonschema, Pydantic, SQLAlchemy, asyncpg, Alembic, `asyncio`, `app.generated` or
   `app.settings`.
 - Outbound adapters import none of Connexion, FastAPI, Starlette, jsonschema, Pydantic
   or `app.generated`, directly. An outbound HTTP client (httpx) is allowed there.
@@ -245,17 +354,24 @@ service owns: add contracts as it grows.
   sides never import each other.
 - Adapters and generated code never import `app.application.services`: only `app.main`
   knows the services. Adapters import ports; generated code does not (next rule).
-- `app.application` holds only `services` and `ports`, and services import ports, never
-  the reverse. A new module or folder there must be placed in one of them or in the rule.
+- Adapters and generated code never import `app.application.scheduling` either, and services
+  never import its runner (`due_job_runner`): they may implement its `ScheduledTask`.
+- `app.application` holds only `services`, `scheduling` and `ports`, and each imports only
+  what is below it in that order, never the reverse. A new module or folder there must be placed in one of them or in the rule.
 - Generated code (`app.generated`) directly imports nothing from the application, domain,
   outbound adapters, settings or `app.main`; its handlers reach the application through
   the inbound adapter they call (indirect imports are allowed).
 - Inbound adapters touch no database library (SQLAlchemy, asyncpg, Alembic) and no settings.
 - `app.settings` imports nothing else from the app.
-- `app.main` is the composition root. It directly imports concretes only: no ports, domain
+- `app.main`, `app.worker`, `app.scheduled_jobs` and `app.wiring` are the composition roots and
+  their shared factory. The server never imports the job runner, and `app.__main__` loads no web
+  stack; `app.wiring` builds no inbound adapter.
+  They directly import concretes only: no ports, domain
   modules, generated models, Pydantic or `pydantic_core` (pass a longer list of probes
   inline or as a tuple: annotating it with the port type is not allowed). Translating errors
   into responses belongs to the inbound adapter `http_errors.py`.
+- `app.worker` loads no web framework, `app.generated` or `app.main`, even through another
+  module, so the job runner stays small and never builds the web application.
 
 A folder without an `__init__.py` is invisible to import-linter, so ruff's `INP001`
 fails the lint step for one under `app/`. Every contract has a planted-violation test
@@ -293,7 +409,7 @@ repository.
 
 ```
 openapi/openapi.yml      example contract; a service replaces this
-Dockerfile               dev target (tooling, git, ssh, gh, psql, bind mount) and prod target (slim)
+Dockerfile               dev target (tooling, git, ssh, gh, psql, bind mount), prod (slim), and the job runner target jobs
 compose.yaml             app + postgres:16 (.env.example lists the knobs)
 requirements*.txt        pinned versions: runtime, tooling, and tools/service_gen/ (generator); compiled with uv (see the header of requirements.txt)
 requirements*.in         the loose lists those are compiled from
@@ -303,7 +419,7 @@ dev.sh                   dispatcher: ./dev.sh <cmd> -> scripts/<cmd>.sh, else se
 scripts/                 one command per file; line 2 is its help text
 service_scripts/         a service's own commands, same shape; never replaced by upgrade
 tools/service_gen/       the generator: cli.py, spec.py, render.py, templates/, tests/
-.github/workflows/ci.yml lint + typecheck + test in Docker; prod image build
+.github/workflows/ci.yml lint + typecheck + test in Docker; prod and jobs image builds
 TEMPLATE_VERSION         what a service was last upgraded to
 ```
 

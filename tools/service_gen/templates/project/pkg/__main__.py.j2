@@ -1,0 +1,33 @@
+"""Command line: ``python -m app serve`` or ``python -m app run-due-jobs``."""
+
+from __future__ import annotations
+
+import argparse
+from collections.abc import Sequence
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m {{ package }}")
+    commands = parser.add_subparsers(dest="command", required=True)
+    serve = commands.add_parser("serve", help="run the HTTP server")
+    serve.add_argument("--host", default="0.0.0.0")
+    serve.add_argument("--port", type=int, default=8080)
+    serve.add_argument("--reload", action="store_true")
+    commands.add_parser("run-due-jobs", help="run the scheduled jobs that are due, then exit")
+
+    args = parser.parse_args(argv)
+    if args.command == "serve":
+        # Imported here so `run-due-jobs` never loads the web server; run by import string so
+        # this command line does not load the web application either.
+        import uvicorn
+
+        uvicorn.run("{{ package }}.main:app", host=args.host, port=args.port, reload=args.reload)
+        return 0
+    # Imported here so `serve` never loads the job runner's root.
+    from {{ package }}.worker import run_due_jobs
+
+    return run_due_jobs()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,78 @@
+"""The job runner's entry points: the command and `python -m app`."""
+
+import io
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from {{ package }} import worker
+from {{ package }}.adapters.inbound.jobs_cli import run_due_jobs_command
+from {{ package }}.application.ports.job_runner import JobResult, JobStatus, RunReport
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+class FakeRunner:
+    def __init__(self, *results: JobResult) -> None:
+        self._report = RunReport(results)
+
+    async def run_due_jobs(self) -> RunReport:
+        return self._report
+
+
+OK = JobResult("purge", JobStatus.RAN)
+IDLE = JobResult("report", JobStatus.NOT_DUE)
+BROKEN = JobResult("sync", JobStatus.FAILED, "RuntimeError: no")
+
+
+async def test_the_command_prints_one_line_per_job_and_exits_0() -> None:
+    out = io.StringIO()
+
+    code = await run_due_jobs_command(FakeRunner(OK, IDLE), out)
+
+    assert code == 0
+    assert out.getvalue() == "purge: ran\nreport: not due\n"
+
+
+async def test_the_command_exits_1_when_a_job_failed() -> None:
+    out = io.StringIO()
+
+    code = await run_due_jobs_command(FakeRunner(OK, BROKEN), out)
+
+    assert code == 1
+    assert "sync: failed: RuntimeError: no" in out.getvalue()
+
+
+@pytest.fixture
+def no_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the entry points with an empty job list: the service's real jobs must never run, or
+    even touch the database, from a test."""
+    monkeypatch.setattr(worker, "build_scheduled_jobs", lambda settings, wiring: ())
+
+
+def test_the_command_runs_through_the_root(
+    no_jobs: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert worker.run_due_jobs() == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_the_job_runner_command_does_not_load_the_web_application() -> None:
+    code = (
+        "import sys; import {{ package }}.__main__, {{ package }}.worker; "
+        "banned = {'uvicorn', 'connexion', 'starlette', '{{ package }}.main', "
+        "'{{ package }}.generated'}; "
+        "loaded = banned & set(sys.modules); "
+        "sys.exit(f'loaded {loaded}' if loaded else 0)"
+    )
+    result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_an_unknown_command_is_refused() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "{{ package }}", "nonsense"], cwd=ROOT, capture_output=True, text=True
+    )
+    assert result.returncode == 2

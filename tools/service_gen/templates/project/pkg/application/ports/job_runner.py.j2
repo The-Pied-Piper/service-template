@@ -1,0 +1,36 @@
+"""The "run due jobs" port, called by the inbound adapters that trigger a run."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Protocol
+
+
+class JobStatus(StrEnum):
+    RAN = "ran"
+    FAILED = "failed"
+    NOT_DUE = "not due"
+    CLAIMED_ELSEWHERE = "claimed elsewhere"
+
+
+@dataclass(frozen=True)
+class JobResult:
+    name: str
+    status: JobStatus
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class RunReport:
+    results: tuple[JobResult, ...]
+
+    @property
+    def failed(self) -> bool:
+        return any(result.status is JobStatus.FAILED for result in self.results)
+
+
+class JobRunner(Protocol):
+    async def run_due_jobs(self) -> RunReport:
+        """Run every scheduled job that is due, and report what happened to each."""
+        ...

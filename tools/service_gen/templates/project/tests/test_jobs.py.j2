@@ -1,0 +1,374 @@
+"""DueJobRunner with an in-memory store and a clock the test sets."""
+
+import asyncio
+from datetime import UTC, datetime, timedelta
+from typing import Protocol
+
+import pytest
+
+from {{ package }}.adapters.inbound.cron import CronSyntaxError, parse_cron
+from {{ package }}.application.ports.job_runner import JobStatus
+from {{ package }}.application.scheduling.due_job_runner import DueJobRunner, DuplicateJobError
+from {{ package }}.application.scheduling.task import DEFAULT_STALE_AFTER, ScheduledJob
+from {{ package }}.domain.job_run import JobRun
+
+
+class FakeClock:
+    def __init__(self, now: datetime) -> None:
+        self.current = now
+
+    def now(self) -> datetime:
+        return self.current
+
+
+class FakeStore:
+    """Same contract as the Postgres store: claim only succeeds on an unchanged, unlocked record."""
+
+    def __init__(self) -> None:
+        self.runs: dict[str, JobRun] = {}
+
+    async def get(self, name: str) -> JobRun | None:
+        await asyncio.sleep(0)  # a real store waits here: let another runner read at the same time
+        return self.runs.get(name)
+
+    async def claim(
+        self,
+        name: str,
+        *,
+        seen_last_started_at: datetime | None,
+        now: datetime,
+        locked_since_before: datetime,
+    ) -> bool:
+        run = self.runs.get(name, JobRun(name))
+        if run.last_started_at != seen_last_started_at:
+            return False
+        if run.running_since is not None and run.running_since >= locked_since_before:
+            return False
+        self.runs[name] = JobRun(name, now, run.last_finished_at, now, run.last_error)
+        return True
+
+    async def finish(
+        self, name: str, *, started_at: datetime, finished_at: datetime, error: str | None
+    ) -> None:
+        run = self.runs[name]
+        if run.last_started_at != started_at:
+            return
+        self.runs[name] = JobRun(name, run.last_started_at, finished_at, None, error)
+
+
+MIDNIGHT = datetime(2026, 11, 28, 0, 0, 3, tzinfo=UTC)
+
+
+class Counter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self) -> None:
+        self.calls += 1
+
+
+class Failing:
+    def __init__(self, message: str = "no") -> None:
+        self.calls = 0
+        self._message = message
+
+    async def run(self) -> None:
+        self.calls += 1
+        raise RuntimeError(self._message)
+
+
+def job(name: str, schedule: str, task: object, **options: timedelta) -> ScheduledJob:
+    return ScheduledJob(name, parse_cron(schedule), task, **options)  # type: ignore[arg-type]
+
+
+def build(*jobs: tuple[str, str, Counter]) -> tuple[DueJobRunner, FakeStore, FakeClock]:
+    store, clock = FakeStore(), FakeClock(MIDNIGHT)
+    runner = DueJobRunner([job(*each) for each in jobs], store, clock)
+    return runner, store, clock
+
+
+async def test_a_job_that_never_ran_runs_and_is_recorded() -> None:
+    task = Counter()
+    runner, store, _ = build(("purge", "0 0 * * *", task))
+
+    report = await runner.run_due_jobs()
+
+    assert [(r.name, r.status) for r in report.results] == [("purge", JobStatus.RAN)]
+    assert task.calls == 1
+    run = store.runs["purge"]
+    assert run.last_started_at == MIDNIGHT
+    assert run.last_finished_at == MIDNIGHT
+    assert run.running_since is None
+    assert run.last_error is None
+
+
+async def test_a_job_that_is_not_due_does_not_run() -> None:
+    task = Counter()
+    runner, _, clock = build(("purge", "0 0 * * *", task))
+    await runner.run_due_jobs()
+
+    clock.current = MIDNIGHT + timedelta(hours=23)
+    report = await runner.run_due_jobs()
+
+    assert report.results[0].status is JobStatus.NOT_DUE
+    assert task.calls == 1
+
+
+async def test_the_next_midnight_runs_it_again() -> None:
+    task = Counter()
+    runner, _, clock = build(("purge", "0 0 * * *", task))
+    await runner.run_due_jobs()
+
+    clock.current = MIDNIGHT + timedelta(days=1)
+    await runner.run_due_jobs()
+
+    assert task.calls == 2
+
+
+async def test_each_job_follows_its_own_schedule() -> None:
+    daily, monthly = Counter(), Counter()
+    runner, _, clock = build(("daily", "0 0 * * *", daily), ("monthly", "0 0 1 * *", monthly))
+    await runner.run_due_jobs()  # both never ran: both run
+
+    clock.current = datetime(2026, 11, 29, 0, 0, 1, tzinfo=UTC)
+    report = await runner.run_due_jobs()
+
+    assert {r.name: r.status for r in report.results} == {
+        "daily": JobStatus.RAN,
+        "monthly": JobStatus.NOT_DUE,
+    }
+
+
+async def test_a_failing_job_is_recorded_and_the_others_still_run() -> None:
+    after = Counter()
+    store = FakeStore()
+    runner = DueJobRunner(
+        [
+            job("broken", "0 0 * * *", Failing("disk is full")),
+            job("after", "0 0 * * *", after),
+        ],
+        store,
+        FakeClock(MIDNIGHT),
+    )
+
+    report = await runner.run_due_jobs()
+
+    assert report.failed
+    assert [(r.name, r.status) for r in report.results] == [
+        ("broken", JobStatus.FAILED),
+        ("after", JobStatus.RAN),
+    ]
+    assert report.results[0].error == "RuntimeError: disk is full"
+    assert store.runs["broken"].last_error == "RuntimeError: disk is full"
+    assert store.runs["broken"].running_since is None
+    assert after.calls == 1
+
+
+async def test_a_store_failure_when_finishing_does_not_stop_the_other_jobs() -> None:
+    class FinishFails(FakeStore):
+        async def finish(
+            self, name: str, *, started_at: datetime, finished_at: datetime, error: str | None
+        ) -> None:
+            raise ConnectionError("database went away")
+
+    after = Counter()
+    runner = DueJobRunner(
+        [job("first", "0 0 * * *", Counter()), job("second", "0 0 * * *", after)],
+        FinishFails(),
+        FakeClock(MIDNIGHT),
+    )
+
+    report = await runner.run_due_jobs()
+
+    assert [r.status for r in report.results] == [JobStatus.RAN, JobStatus.RAN]
+    assert after.calls == 1
+
+
+async def test_a_failed_job_waits_for_its_next_scheduled_time() -> None:
+    broken = Failing()
+    clock = FakeClock(MIDNIGHT)
+    runner = DueJobRunner([job("broken", "0 0 * * *", broken)], FakeStore(), clock)
+    await runner.run_due_jobs()
+
+    clock.current = MIDNIGHT + timedelta(hours=1)
+    await runner.run_due_jobs()
+
+    assert broken.calls == 1
+
+
+async def test_long_error_text_is_cut() -> None:
+    runner = DueJobRunner(
+        [job("broken", "0 0 * * *", Failing("x" * 10_000))], FakeStore(), FakeClock(MIDNIGHT)
+    )
+
+    report = await runner.run_due_jobs()
+
+    assert report.results[0].error is not None
+    assert len(report.results[0].error) == 2000
+
+
+async def test_a_job_running_elsewhere_is_skipped() -> None:
+    task = Counter()
+    runner, store, clock = build(("purge", "0 0 * * *", task))
+    store.runs["purge"] = JobRun(
+        "purge", MIDNIGHT - timedelta(days=1), None, MIDNIGHT - timedelta(minutes=5)
+    )
+
+    report = await runner.run_due_jobs()
+
+    assert report.results[0].status is JobStatus.CLAIMED_ELSEWHERE
+    assert task.calls == 0
+
+
+async def test_a_lock_older_than_the_stale_limit_is_ignored() -> None:
+    task = Counter()
+    runner, store, _ = build(("purge", "0 0 * * *", task))
+    store.runs["purge"] = JobRun(
+        "purge", MIDNIGHT - timedelta(days=1), None, MIDNIGHT - timedelta(hours=2)
+    )
+
+    report = await runner.run_due_jobs()
+
+    assert report.results[0].status is JobStatus.RAN
+
+
+async def test_each_job_has_its_own_stale_limit() -> None:
+    quick, slow = Counter(), Counter()
+    store, clock = FakeStore(), FakeClock(MIDNIGHT)
+    runner = DueJobRunner(
+        [
+            job("quick", "*/5 * * * *", quick, stale_after=timedelta(minutes=10)),
+            job("slow", "*/5 * * * *", slow),
+        ],
+        store,
+        clock,
+    )
+    for name in ("quick", "slow"):  # both last started 20 minutes ago and never finished
+        store.runs[name] = JobRun(
+            name, MIDNIGHT - timedelta(minutes=20), None, MIDNIGHT - timedelta(minutes=20)
+        )
+
+    report = await runner.run_due_jobs()
+
+    assert {r.name: r.status for r in report.results} == {
+        "quick": JobStatus.RAN,
+        "slow": JobStatus.CLAIMED_ELSEWHERE,
+    }
+    assert DEFAULT_STALE_AFTER > timedelta(minutes=20)
+
+
+async def test_a_store_failure_when_reading_is_reported_and_the_others_still_run() -> None:
+    class ReadFails(FakeStore):
+        async def get(self, name: str) -> JobRun | None:
+            if name == "first":
+                raise ConnectionError("database went away")
+            return await super().get(name)
+
+    after = Counter()
+    runner = DueJobRunner(
+        [job("first", "0 0 * * *", Counter()), job("second", "0 0 * * *", after)],
+        ReadFails(),
+        FakeClock(MIDNIGHT),
+    )
+
+    report = await runner.run_due_jobs()
+
+    assert report.failed
+    assert report.results[0].status is JobStatus.FAILED
+    assert report.results[0].error == "ConnectionError: database went away"
+    assert report.results[1].status is JobStatus.RAN
+    assert after.calls == 1
+
+
+async def test_two_runners_over_one_store_run_the_job_once() -> None:
+    task = Counter()
+    store, clock = FakeStore(), FakeClock(MIDNIGHT)
+    jobs = [job("purge", "0 0 * * *", task)]
+    first, second = DueJobRunner(jobs, store, clock), DueJobRunner(jobs, store, clock)
+
+    await asyncio.gather(first.run_due_jobs(), second.run_due_jobs())
+
+    assert task.calls == 1
+
+
+async def test_no_jobs_is_an_empty_report() -> None:
+    report = await DueJobRunner([], FakeStore(), FakeClock(MIDNIGHT)).run_due_jobs()
+    assert report.results == ()
+    assert not report.failed
+
+
+def test_the_services_scheduled_jobs_have_valid_schedules_and_unique_names() -> None:
+    """Needs no database: building the job list and the runner must not fail."""
+    from {{ package }}.scheduled_jobs import build_scheduled_jobs
+    from {{ package }}.settings import Settings
+    from {{ package }}.wiring import build_wiring
+
+    settings = Settings()
+    jobs = build_scheduled_jobs(settings, build_wiring(settings))
+    DueJobRunner(jobs, FakeStore(), FakeClock(MIDNIGHT))
+
+
+def test_two_jobs_with_one_name_are_refused() -> None:
+    with pytest.raises(DuplicateJobError, match="purge"):
+        DueJobRunner(
+            [job("purge", "0 0 * * *", Counter()), job("purge", "0 1 * * *", Counter())],
+            FakeStore(),
+            FakeClock(MIDNIGHT),
+        )
+
+
+def test_a_job_needs_a_name_and_a_positive_stale_limit() -> None:
+    with pytest.raises(ValueError, match="needs a name"):
+        job(" ", "0 0 * * *", Counter())
+    with pytest.raises(ValueError, match="stale_after"):
+        job("purge", "0 0 * * *", Counter(), stale_after=timedelta(0))
+
+
+def test_the_runner_keeps_the_list_it_was_given() -> None:
+    jobs = [job("purge", "0 0 * * *", Counter())]
+    runner = DueJobRunner(jobs, FakeStore(), FakeClock(MIDNIGHT))
+    jobs.append(job("other", "0 0 * * *", Counter()))
+
+    report = asyncio.run(runner.run_due_jobs())
+
+    assert [r.name for r in report.results] == ["purge"]
+
+
+def test_text_that_is_not_cron_fails_when_the_job_is_built() -> None:
+    with pytest.raises(CronSyntaxError):
+        parse_cron("every day")
+
+
+class MessagesPort(Protocol):
+    async def delete_older_than_months(self, months: int) -> None: ...
+
+
+class PurgeOldMessages:
+    """The shape of a task: a use case with run(), knowing nothing of being scheduled. It works
+    through a port, which an outbound adapter implements."""
+
+    def __init__(self, messages: MessagesPort) -> None:
+        self._messages = messages
+
+    async def run(self) -> None:
+        await self._messages.delete_older_than_months(12)
+
+
+async def test_a_use_case_runs_as_a_task_through_the_runner() -> None:
+    class Messages:
+        deleted: list[int] = []
+
+        async def delete_older_than_months(self, months: int) -> None:
+            self.deleted.append(months)
+
+    messages = Messages()
+    runner = DueJobRunner(
+        [job("purge-old-messages", "0 0 * * *", PurgeOldMessages(messages))],
+        FakeStore(),
+        FakeClock(MIDNIGHT),
+    )
+
+    report = await runner.run_due_jobs()
+
+    assert [(r.name, r.status) for r in report.results] == [("purge-old-messages", JobStatus.RAN)]
+    assert messages.deleted == [12]

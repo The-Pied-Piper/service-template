@@ -18,3 +18,7 @@ class ConflictError(DomainError):
 
 class ValidationError(DomainError):
     pass
+
+
+class InvalidScheduleError(ValidationError):
+    """A schedule that is out of bounds or never fires."""

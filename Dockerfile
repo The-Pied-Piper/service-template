@@ -24,8 +24,8 @@ ARG GID=1000
 RUN groupadd -o -g "$GID" dev && useradd -o -u "$UID" -g "$GID" -d /tmp -M -s /bin/bash dev
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]
 
-# --- prod: runtime deps only, source baked in, non-root -------------------------
-FROM base AS prod
+# --- runtime: runtime deps only, source baked in, non-root; prod and jobs build on it -----
+FROM base AS runtime
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin app
 COPY openapi ./openapi
@@ -33,5 +33,15 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 COPY app ./app
 USER app
+
+# --- prod: the HTTP server ------------------------------------------------------------------
+FROM runtime AS prod
 EXPOSE 8080
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+# --- jobs: runs the scheduled jobs that are due, then exits ---------------------------------
+# For a trigger that starts a container (Kubernetes CronJob, ECS scheduled task, cron + docker).
+# It is built from runtime, not prod, so anything a service adds to prod (for example a Lambda
+# Web Adapter, which waits for a web server on its port) is not in it.
+FROM runtime AS jobs
+CMD ["python", "-m", "app", "run-due-jobs"]

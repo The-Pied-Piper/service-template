@@ -1,0 +1,74 @@
+"""When a schedule fires: the minutes, hours, days and months it allows, and what is next.
+
+A `Schedule` is the domain's view of a cron expression, read in UTC. The text itself is wire
+format: the inbound adapter `adapters/inbound/cron.py` translates it into this value. As in
+classic cron, when both day fields are restricted a day matches if either one does.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+
+from {{ package }}.domain.errors import InvalidScheduleError
+
+# Long enough to reach the next 29 February from any date, across a skipped leap year.
+_SEARCH_DAYS = 366 * 8
+
+_EPOCH = datetime(2000, 1, 1, tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class Schedule:
+    minutes: frozenset[int]
+    hours: frozenset[int]
+    days_of_month: frozenset[int]
+    months: frozenset[int]
+    days_of_week: frozenset[int]  # 0-6, Sunday is 0
+    day_of_month_restricted: bool
+    day_of_week_restricted: bool
+
+    def __post_init__(self) -> None:
+        """Every set holds values within its field's bounds, and the schedule fires sometime
+        (`0 0 31 2 *` never does)."""
+        for name, values, low, high in (
+            ("minutes", self.minutes, 0, 59),
+            ("hours", self.hours, 0, 23),
+            ("days of month", self.days_of_month, 1, 31),
+            ("months", self.months, 1, 12),
+            ("days of week", self.days_of_week, 0, 6),
+        ):
+            if not values or not all(low <= value <= high for value in values):
+                raise InvalidScheduleError(f"{name} must be a non-empty set within {low}-{high}")
+        self.next_after(_EPOCH)
+
+    def next_after(self, moment: datetime) -> datetime:
+        """The first minute strictly after `moment` that the schedule fires, in UTC."""
+        if moment.tzinfo is None:
+            raise ValueError("moment must be timezone-aware")
+        candidate = moment.astimezone(UTC).replace(second=0, microsecond=0) + timedelta(minutes=1)
+        limit = candidate + timedelta(days=_SEARCH_DAYS)
+        while candidate <= limit:
+            if candidate.month not in self.months:
+                candidate = _first_of_next_month(candidate)
+            elif not self._day_matches(candidate):
+                candidate = (candidate + timedelta(days=1)).replace(hour=0, minute=0)
+            elif candidate.hour not in self.hours:
+                candidate = (candidate + timedelta(hours=1)).replace(minute=0)
+            elif candidate.minute not in self.minutes:
+                candidate += timedelta(minutes=1)
+            else:
+                return candidate
+        raise InvalidScheduleError("the schedule never fires")
+
+    def _day_matches(self, moment: datetime) -> bool:
+        in_month = moment.day in self.days_of_month
+        in_week = moment.isoweekday() % 7 in self.days_of_week
+        if self.day_of_month_restricted and self.day_of_week_restricted:
+            return in_month or in_week
+        return in_month and in_week
+
+
+def _first_of_next_month(moment: datetime) -> datetime:
+    year, month = (moment.year + 1, 1) if moment.month == 12 else (moment.year, moment.month + 1)
+    return moment.replace(year=year, month=month, day=1, hour=0, minute=0)

@@ -1,0 +1,42 @@
+"""Composition root for the job runner: runs the scheduled jobs that are due, then exits.
+
+The second way to start the service, next to the HTTP server in `main.py`. It builds no web
+application and loads no web framework. The command line (`python -m app run-due-jobs`) ends
+here. Something outside fires it, at midnight UTC for example. The jobs themselves are built in
+`scheduled_jobs.py`. `build_runner` is public so a service that triggers the runner another way
+(a Lambda handler, say) can add its own inbound adapter and an entry function here that builds
+the runner and calls that adapter.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+
+from {{ package }}.adapters.inbound.jobs_cli import run_due_jobs_command
+from {{ package }}.adapters.outbound.db import SqlJobRunStore
+from {{ package }}.application.scheduling.due_job_runner import DueJobRunner
+from {{ package }}.scheduled_jobs import build_scheduled_jobs
+from {{ package }}.settings import Settings
+from {{ package }}.wiring import Wiring, build_wiring
+
+
+def build_runner(settings: Settings, wiring: Wiring) -> DueJobRunner:
+    jobs = build_scheduled_jobs(settings, wiring)
+    return DueJobRunner(jobs, SqlJobRunStore(wiring.session_factory), wiring.clock)
+
+
+async def _run_cli(settings: Settings) -> int:
+    wiring = build_wiring(settings)
+    try:
+        return await run_due_jobs_command(build_runner(settings, wiring), sys.stdout)
+    finally:
+        await wiring.dispose()
+
+
+def run_due_jobs(settings: Settings | None = None) -> int:
+    """`python -m app run-due-jobs`: exit code 0, or 1 when a job failed."""
+    settings = settings or Settings()
+    logging.basicConfig(level=settings.log_level)
+    return asyncio.run(_run_cli(settings))

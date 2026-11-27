@@ -50,7 +50,13 @@ name = "Layers point inward"
 type = "layers"
 containers = ["app"]
 layers = [
-    "main",
+    # The command line, then the two composition roots (neither may import the other: the
+    # job runner must not load the web application), then the service's scheduled jobs (the
+    # job runner's), then the wiring both share.
+    "__main__",
+    "main | worker",
+    "scheduled_jobs",
+    "wiring",
     "adapters",
     "application",
     "domain",
@@ -62,7 +68,7 @@ exhaustive_ignores = ["generated", "settings"]
 
 [[tool.importlinter.contracts]]
 id = "core-framework-free"
-name = "Domain and application know no framework, wire model or settings"
+name = "Domain and application know no framework, wire model, settings or event loop"
 type = "forbidden"
 source_modules = ["app.domain", "app.application"]
 forbidden_modules = [
@@ -77,6 +83,7 @@ forbidden_modules = [
     "fastapi",
     "jsonschema",
     "starlette",
+    "asyncio",
     "app.generated",
     "app.settings",
 ]
@@ -108,17 +115,17 @@ exhaustive = true
 
 [[tool.importlinter.contracts]]
 id = "adapters-depend-on-ports-only"
-name = "Adapters import ports, never services (only the composition root knows services)"
+name = "Adapters import ports, never services or scheduling (only the composition root knows them)"
 type = "forbidden"
 source_modules = ["app.adapters", "app.generated"]
-forbidden_modules = ["app.application.services"]
+forbidden_modules = ["app.application.services", "app.application.scheduling"]
 
 [[tool.importlinter.contracts]]
 id = "application-sublayers"
-name = "Inside the application, services depend on ports, never the reverse"
+name = "Inside the application, services depend on scheduling and ports, never the reverse"
 type = "layers"
 containers = ["app.application"]
-layers = ["services", "ports"]
+layers = ["services", "scheduling", "ports"]
 exhaustive = true
 
 [[tool.importlinter.contracts]]
@@ -158,9 +165,15 @@ forbidden_modules = ["sqlalchemy", "asyncpg", "alembic", "app.settings"]
 
 [[tool.importlinter.contracts]]
 id = "main-wires-concretes-only"
-name = "Composition root imports concretes only: no port, domain module, DTO or validation library"
+name = "Composition roots import concretes only: no port, domain module, DTO or validation library"
 type = "forbidden"
-source_modules = ["app.main"]
+source_modules = [
+    "app.__main__",
+    "app.main",
+    "app.worker",
+    "app.scheduled_jobs",
+    "app.wiring",
+]
 forbidden_modules = [
     "pydantic",
     "pydantic_core",
@@ -170,3 +183,60 @@ forbidden_modules = [
 ]
 # Direct imports only: main reaches these through the adapters and services it wires.
 allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "worker-is-web-free"
+name = "The job runner loads no web framework, wire model or HTTP adapter, directly or indirectly"
+type = "forbidden"
+source_modules = ["app.worker"]
+forbidden_modules = [
+    "connexion",
+    "fastapi",
+    "starlette",
+    "uvicorn",
+    "app.generated",
+    "app.main",
+    "app.adapters.inbound.http_errors",
+]
+
+[[tool.importlinter.contracts]]
+id = "wiring-builds-no-inbound-adapters"
+name = "Shared wiring builds no inbound adapter: each root picks its own"
+type = "forbidden"
+source_modules = ["app.wiring"]
+forbidden_modules = ["app.adapters.inbound"]
+
+[[tool.importlinter.contracts]]
+id = "services-see-the-task-contract-only"
+name = "Services implement ScheduledTask but never reach the runner that calls it"
+type = "forbidden"
+source_modules = ["app.application.services"]
+forbidden_modules = ["app.application.scheduling.due_job_runner"]
+
+[[tool.importlinter.contracts]]
+id = "server-has-no-job-runner"
+name = "The HTTP server never loads the job runner's root, runner or entry-point adapters"
+type = "forbidden"
+source_modules = ["app.main"]
+forbidden_modules = [
+    "app.worker",
+    "app.scheduled_jobs",
+    "app.application.scheduling.due_job_runner",
+    "app.adapters.inbound.jobs_cli",
+]
+# Indirect imports count: a module the server reaches (wiring, an adapter) must not pull the
+# runner in either. Services may still name the task contract (`scheduling.task`).
+
+[[tool.importlinter.contracts]]
+id = "command-line-is-web-free"
+name = "The command line loads no web framework, wire model or HTTP adapter"
+type = "forbidden"
+source_modules = ["app.__main__"]
+forbidden_modules = [
+    "connexion",
+    "fastapi",
+    "starlette",
+    "app.generated",
+    "app.main",
+    "app.adapters.inbound.http_errors",
+]

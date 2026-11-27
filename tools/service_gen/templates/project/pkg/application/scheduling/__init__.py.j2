@@ -1,0 +1,6 @@
+"""Scheduling: the rule for running work that is due, and the contract a scheduled task meets.
+
+`ScheduledTask` is a contract inside the application, not a port: no adapter calls it and no
+adapter implements it. Your own use cases implement it and the composition root hands them to
+`DueJobRunner`, which knows nothing else about them. Adapters never import this package.
+"""

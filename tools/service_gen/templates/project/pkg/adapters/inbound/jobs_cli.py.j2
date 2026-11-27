@@ -1,0 +1,18 @@
+"""The `run-due-jobs` command: runs what is due and prints one line per job.
+
+Exit code 0 when no job failed, 1 when at least one did, so cron and Kubernetes see failures.
+"""
+
+from __future__ import annotations
+
+from typing import TextIO
+
+from {{ package }}.application.ports.job_runner import JobRunner
+
+
+async def run_due_jobs_command(runner: JobRunner, out: TextIO) -> int:
+    report = await runner.run_due_jobs()
+    for result in report.results:
+        detail = f": {result.error}" if result.error else ""
+        print(f"{result.name}: {result.status.value}{detail}", file=out)
+    return 1 if report.failed else 0

@@ -76,3 +76,13 @@ jobs:
           tags: ${{ github.event.repository.name }}:${{ github.sha }}
           cache-from: type=gha,scope=prod
           cache-to: type=gha,scope=prod,mode=max
+
+      - name: Build job runner image
+        if: hashFiles('app/worker.py') != ''
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: jobs
+          tags: ${{ github.event.repository.name }}-jobs:${{ github.sha }}
+          cache-from: type=gha,scope=jobs
+          cache-to: type=gha,scope=jobs,mode=max

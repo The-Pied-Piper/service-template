@@ -1,0 +1,28 @@
+"""What is remembered about a scheduled job, and the rule for when it is due."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+
+from {{ package }}.domain.schedule import Schedule
+
+
+@dataclass(frozen=True)
+class JobRun:
+    """The record of one job: when it last started and finished, and whether it is running."""
+
+    name: str
+    last_started_at: datetime | None = None
+    last_finished_at: datetime | None = None
+    running_since: datetime | None = None
+    last_error: str | None = None
+
+
+def is_due(schedule: Schedule, last_started_at: datetime | None, now: datetime) -> bool:
+    """A job that never ran is due. Otherwise it is due once the schedule has fired since it last
+    started, so a missed tick is picked up by the next one. A job that failed waits for its next
+    scheduled time like any other; it is not retried straight away."""
+    if last_started_at is None:
+        return True
+    return schedule.next_after(last_started_at) <= now

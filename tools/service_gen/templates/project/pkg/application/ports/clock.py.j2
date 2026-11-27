@@ -1,0 +1,12 @@
+"""The clock, so the time a rule sees can be set in a test."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Protocol
+
+
+class Clock(Protocol):
+    def now(self) -> datetime:
+        """The current moment, timezone-aware."""
+        ...

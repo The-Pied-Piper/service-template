@@ -1,0 +1,128 @@
+"""Cron expressions (the inbound adapter) and the schedule and "is due" rules (the domain):
+no clock, no database."""
+
+from datetime import UTC, datetime
+
+import pytest
+
+from {{ package }}.adapters.inbound.cron import CronSyntaxError, parse_cron
+from {{ package }}.domain.errors import InvalidScheduleError
+from {{ package }}.domain.job_run import is_due
+
+
+def at(text: str) -> datetime:
+    return datetime.fromisoformat(text).replace(tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("expression", "after", "expected"),
+    [
+        ("0 0 * * *", "2026-11-27T20:05:46", "2026-11-28T00:00:00"),
+        ("0 0 * * *", "2026-11-28T00:00:00", "2026-11-29T00:00:00"),  # strictly after
+        ("0 0 * * *", "2026-12-31T23:59:59", "2027-01-01T00:00:00"),
+        ("*/15 * * * *", "2026-11-27T10:07:30", "2026-11-27T10:15:00"),
+        ("30 9-17/4 * * *", "2026-11-27T10:00:00", "2026-11-27T13:30:00"),
+        ("0 12 1,15 * *", "2026-11-02T00:00:00", "2026-11-15T12:00:00"),
+        ("0 6 * * 1", "2026-11-27T00:00:00", "2026-11-30T06:00:00"),  # Monday
+        ("0 6 * * 7", "2026-11-27T00:00:00", "2026-11-29T06:00:00"),  # 7 is Sunday
+        ("0 0 29 2 *", "2026-03-01T00:00:00", "2028-02-29T00:00:00"),  # next leap day
+        ("0 0 29 2 *", "2099-03-01T00:00:00", "2104-02-29T00:00:00"),  # 2100 is not a leap year
+        ("0 0 1 1 *", "2026-01-01T00:00:00", "2027-01-01T00:00:00"),
+        ("5/20 * * * *", "2026-11-27T10:06:00", "2026-11-27T10:25:00"),
+        ("  0   0  *  *  * ", "2026-11-27T20:05:46", "2026-11-28T00:00:00"),
+    ],
+)
+def test_next_after(expression: str, after: str, expected: str) -> None:
+    assert parse_cron(expression).next_after(at(after)) == at(expected)
+
+
+def test_day_of_month_or_day_of_week_when_both_are_restricted() -> None:
+    # 13th of the month or any Friday. 2026-11-13 is a Friday; 2026-11-20 is the next one.
+    schedule = parse_cron("0 0 13 * 5")
+    assert schedule.next_after(at("2026-11-01T00:00:00")) == at("2026-11-06T00:00:00")
+    assert schedule.next_after(at("2026-11-13T00:00:00")) == at("2026-11-20T00:00:00")
+    assert schedule.next_after(at("2026-11-28T00:00:00")) == at("2026-12-04T00:00:00")
+
+
+def test_other_time_zones_are_read_as_utc() -> None:
+    from datetime import timedelta, timezone
+
+    eastern = timezone(timedelta(hours=-5))
+    moment = datetime(2026, 11, 27, 20, 0, tzinfo=eastern)  # 01:00 UTC on the 28th
+    assert parse_cron("0 0 * * *").next_after(moment) == at("2026-11-29T00:00:00")
+
+
+def test_a_naive_moment_is_refused() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        parse_cron("0 0 * * *").next_after(datetime(2026, 11, 27))
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "",
+        "0 0 * *",
+        "0 0 * * * *",
+        "60 0 * * *",
+        "0 24 * * *",
+        "0 0 0 * *",
+        "0 0 32 * *",
+        "0 0 * 13 *",
+        "0 0 * * 8",
+        "5-1 * * * *",
+        "*/0 * * * *",
+        "a * * * *",
+        "-1 * * * *",
+        "1,,2 * * * *",
+        "9" * 5000 + " * * * *",
+    ],
+)
+def test_text_that_is_not_cron_is_refused(expression: str) -> None:
+    with pytest.raises(CronSyntaxError):
+        parse_cron(expression)
+
+
+def test_an_expression_that_never_fires_is_refused() -> None:
+    with pytest.raises(InvalidScheduleError):
+        parse_cron("0 0 31 2 *")  # the 31st of February
+
+
+def test_a_job_that_never_ran_is_due() -> None:
+    assert is_due(parse_cron("0 0 * * *"), None, at("2026-11-27T12:00:00"))
+
+
+def test_due_once_the_schedule_has_fired_since_the_last_start() -> None:
+    schedule = parse_cron("0 0 * * *")
+    started = at("2026-11-27T00:00:07")
+    assert not is_due(schedule, started, at("2026-11-27T23:59:59"))
+    assert is_due(schedule, started, at("2026-11-28T00:00:00"))
+
+
+def test_a_missed_tick_is_picked_up_by_the_next_one() -> None:
+    schedule = parse_cron("0 0 * * *")
+    assert is_due(schedule, at("2026-11-24T00:00:05"), at("2026-11-27T00:00:03"))
+
+
+def test_a_schedule_built_directly_keeps_its_bounds() -> None:
+    from {{ package }}.domain.schedule import Schedule
+
+    ok = {
+        "minutes": frozenset({0}),
+        "hours": frozenset({0}),
+        "days_of_month": frozenset({1}),
+        "months": frozenset({1}),
+        "days_of_week": frozenset({0}),
+        "day_of_month_restricted": False,
+        "day_of_week_restricted": False,
+    }
+    Schedule(**ok)  # type: ignore[arg-type]
+    for field, bad in (
+        ("minutes", frozenset({0, 99})),
+        ("hours", frozenset({24})),
+        ("days_of_month", frozenset({0})),
+        ("months", frozenset({13})),
+        ("days_of_week", frozenset({7})),
+        ("minutes", frozenset()),
+    ):
+        with pytest.raises(InvalidScheduleError):
+            Schedule(**{**ok, field: bad})  # type: ignore[arg-type]
