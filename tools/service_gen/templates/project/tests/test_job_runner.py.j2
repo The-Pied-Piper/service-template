@@ -1,4 +1,4 @@
-"""The job runner's entry points: the command, the Lambda handler and `python -m app`."""
+"""The job runner's entry points: the command and `python -m app`."""
 
 import io
 import subprocess
@@ -9,7 +9,6 @@ import pytest
 
 from {{ package }} import worker
 from {{ package }}.adapters.inbound.jobs_cli import run_due_jobs_command
-from {{ package }}.adapters.inbound.jobs_lambda import JobsFailedError, run_due_jobs_event
 from {{ package }}.application.ports.job_runner import JobResult, JobStatus, RunReport
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,17 +45,6 @@ async def test_the_command_exits_1_when_a_job_failed() -> None:
     assert "sync: failed: RuntimeError: no" in out.getvalue()
 
 
-async def test_the_lambda_event_returns_a_summary() -> None:
-    assert await run_due_jobs_event(FakeRunner(OK, IDLE)) == {
-        "results": ["purge: ran", "report: not due"]
-    }
-
-
-async def test_the_lambda_event_fails_the_invocation_when_a_job_failed() -> None:
-    with pytest.raises(JobsFailedError, match=r"sync \(RuntimeError: no\)"):
-        await run_due_jobs_event(FakeRunner(OK, BROKEN))
-
-
 @pytest.fixture
 def no_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run the entry points with an empty job list: the service's real jobs must never run, or
@@ -69,10 +57,6 @@ def test_the_command_runs_through_the_root(
 ) -> None:
     assert worker.run_due_jobs() == 0
     assert capsys.readouterr().out == ""
-
-
-def test_the_lambda_handler_runs_through_the_root(no_jobs: None) -> None:
-    assert worker.handler({}, None) == {"results": []}
 
 
 def test_the_job_runner_command_does_not_load_the_web_application() -> None:

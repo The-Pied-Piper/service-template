@@ -210,14 +210,14 @@ its error text if it raised. Two overlapping ticks never run a job twice. A run 
 going for more than `stale_after` (an hour unless the `ScheduledJob` says otherwise) is taken as
 crashed and its lock is ignored once the job is due again, so keep every job shorter than that, or
 set a longer `stale_after` for it (a job that outlives it is started again by a later tick, and the
-first run's late finish is ignored). A killed run (a Lambda timeout, an out-of-memory kill) never
+first run's late finish is ignored). A killed run (a timeout, an out-of-memory kill) never
 marks its end, so it blocks the job until `stale_after` passes: set it a little above the longest
 the task really takes. One job failing never stops the others; the command exits 1 if any
 failed. A failed job is not retried until its next scheduled time.
 
 A job that has never run is due at the first tick after it is deployed (or renamed), so a new
 monthly job runs at once. Jobs run one after another in one process, so a long job delays the ones
-after it in the same tick, and under Lambda's time limit it can starve them: split slow work into
+after it in the same tick, and under a platform time limit it can starve them: split slow work into
 separate jobs or schedules.
 
 Extra ticks cost nothing, because a job that is not due is skipped. Trigger the command more often
@@ -231,7 +231,7 @@ trigger dies partway through the list, the jobs not reached run at the next tick
 `JobRunner` port and talks only to ports (`JobRunStore`, `Clock`) and `ScheduledTask`. Your tasks
 implement `ScheduledTask`; the runner never imports them. `ScheduledTask` is not a port (no adapter
 calls or implements it), so it lives beside the ports, and adapters may not import it. Postgres and
-the system clock are outbound adapters. The `run-due-jobs` command and the Lambda handler are
+the system clock are outbound adapters. The `run-due-jobs` command is
 inbound adapters whose only job is to call the `JobRunner` port. The cron text is read by
 `adapters/inbound/cron.py`, which the composition root calls.
 There are two composition roots, `app/main.py` (HTTP server) and `app/worker.py` (job runner,
@@ -240,14 +240,20 @@ the shared `app/wiring.py`. Put a repository or service that a job and an endpoi
 `Wiring`.
 
 **Images.** The `prod` target is the HTTP server. The `jobs` target runs `python -m app
-run-due-jobs`, for a CronJob or a scheduled container task. The `jobs-lambda` target is the same
-as an AWS Lambda container image (handler `app.worker.handler`, via the Runtime Interface
-Client). Both are built from the stage before `prod`, so a Lambda Web Adapter you add to `prod`
-is not in them. That matters because the adapter waits for a web server on its port before it
-serves anything, so a job invocation cannot share the web image. A handler failure means a job
-raised or the store could not be reached, so Lambda's error metric shows it. Use the same
-database settings as the web service. The `jobs-lambda` target's pins are in `requirements-lambda.txt`. Anything you add to `prod` that the
-job runner also needs (system packages, `ENV`) belongs in the `runtime` stage instead.
+run-due-jobs`, for a CronJob or a scheduled container task. It is built from the stage before
+`prod`, so anything you add to `prod` (a Lambda Web Adapter, say, which waits for a web server on
+its port) is not in it. Use the same database settings as the web service. Anything you add to
+`prod` that the job runner also needs (system packages, `ENV`) belongs in the `runtime` stage
+instead.
+
+**Triggering it another way.** The command line is the only trigger the template ships, because
+how a service is triggered is specific to where it runs. To trigger it differently (an AWS Lambda
+handler, an HTTP endpoint behind a scheduler), add your own thin inbound adapter that calls the
+runner's `run_due_jobs()`, as `adapters/inbound/jobs_cli.py` does, and build the runner with
+`build_runner(settings, wiring)` in `app/worker.py` (see `_run_cli` there, which also disposes the
+wiring), plus the image or dependency that trigger needs (for Lambda,
+a second image target with the Runtime Interface Client; it cannot share the web image, because
+the Lambda Web Adapter waits for a web server).
 
 An existing service adopts this by hand: see "Unreleased" in `CHANGELOG.md`.
 
@@ -402,7 +408,7 @@ repository.
 
 ```
 openapi/openapi.yml      example contract; a service replaces this
-Dockerfile               dev target (tooling, git, ssh, gh, psql, bind mount), prod (slim), and the job runner targets jobs and jobs-lambda
+Dockerfile               dev target (tooling, git, ssh, gh, psql, bind mount), prod (slim), and the job runner target jobs
 compose.yaml             app + postgres:16 (.env.example lists the knobs)
 requirements*.txt        pinned versions: runtime, tooling, and tools/service_gen/ (generator); compiled with uv (see the header of requirements.txt)
 requirements*.in         the loose lists those are compiled from

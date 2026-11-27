@@ -223,7 +223,6 @@ forbidden_modules = [
     "app.scheduled_jobs",
     "app.application.scheduling.due_job_runner",
     "app.adapters.inbound.jobs_cli",
-    "app.adapters.inbound.jobs_lambda",
 ]
 # Indirect imports count: a module the server reaches (wiring, an adapter) must not pull the
 # runner in either. Services may still name the task contract (`scheduling.task`).

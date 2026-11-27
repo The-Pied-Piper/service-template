@@ -75,7 +75,6 @@ def test_init_writes_expected_layout(project: Path) -> None:
         "app/adapters/outbound/clock.py",
         "app/adapters/inbound/cron.py",
         "app/adapters/inbound/jobs_cli.py",
-        "app/adapters/inbound/jobs_lambda.py",
         "app/wiring.py",
         "app/worker.py",
         "app/scheduled_jobs.py",
@@ -316,7 +315,7 @@ WORKER_FORBIDDEN = (
 ).split()
 SERVER_FORBIDDEN = (
     "app.worker app.scheduled_jobs app.application.scheduling.due_job_runner "
-    "app.adapters.inbound.jobs_cli app.adapters.inbound.jobs_lambda"
+    "app.adapters.inbound.jobs_cli"
 ).split()
 CLI_FORBIDDEN = (
     "connexion fastapi starlette app.generated.handlers app.main app.adapters.inbound.http_errors"

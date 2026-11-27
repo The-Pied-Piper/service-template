@@ -41,18 +41,7 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
 
 # --- jobs: runs the scheduled jobs that are due, then exits ---------------------------------
 # For a trigger that starts a container (Kubernetes CronJob, ECS scheduled task, cron + docker).
-# It is built from runtime, not prod, so anything a service adds to prod (the AWS Lambda Web
-# Adapter, which waits for a web server on its port) is not in it.
+# It is built from runtime, not prod, so anything a service adds to prod (for example a Lambda
+# Web Adapter, which waits for a web server on its port) is not in it.
 FROM runtime AS jobs
 CMD ["python", "-m", "app", "run-due-jobs"]
-
-# --- jobs-lambda: the same, as an AWS Lambda container image (handler app.worker.handler) ---
-# The AWS Runtime Interface Client lets Lambda call the handler directly. No web adapter, no
-# server, no HTTP request. Its pins are in requirements-lambda.txt (Dependabot bumps them).
-FROM jobs AS jobs-lambda
-USER root
-COPY requirements-lambda.txt ./
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements-lambda.txt
-USER app
-ENTRYPOINT ["python", "-m", "awslambdaric"]
-CMD ["app.worker.handler"]

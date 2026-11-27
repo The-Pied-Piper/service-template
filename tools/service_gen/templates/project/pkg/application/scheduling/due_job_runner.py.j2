@@ -1,6 +1,6 @@
 """Runs the scheduled jobs that are due. Implements the `JobRunner` port.
 
-Something outside the service ticks this (the command line, an AWS Lambda), every day or more
+Something outside the service ticks this (the command line, for example), every day or more
 often; this decides what is due. Each job is read, checked against its schedule, claimed with
 one atomic write, run, and marked finished. A job that raises is recorded as failed and the
 others still run. The runner sees tasks only through `ScheduledTask`, never the services
