@@ -1,0 +1,48 @@
+"""Composition root for the job runner: runs the scheduled jobs that are due, then exits.
+
+The second way to start the service, next to the HTTP server in `main.py`. It builds no web
+application and loads no web framework. The command line (`python -m app run-due-jobs`) and the
+AWS Lambda handler (`{{ package }}.worker.handler`) both end here. Something outside fires it,
+at midnight UTC for example.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+
+from {{ package }}.adapters.inbound.jobs_cli import run_due_jobs_command
+from {{ package }}.adapters.inbound.jobs_lambda import run_due_jobs_event
+from {{ package }}.settings import Settings
+from {{ package }}.wiring import build_job_runner, build_wiring
+
+
+async def _run_cli(settings: Settings) -> int:
+    wiring = build_wiring(settings)
+    try:
+        return await run_due_jobs_command(build_job_runner(wiring), sys.stdout)
+    finally:
+        await wiring.dispose()
+
+
+async def _run_event(settings: Settings) -> dict[str, list[str]]:
+    wiring = build_wiring(settings)
+    try:
+        return await run_due_jobs_event(build_job_runner(wiring))
+    finally:
+        await wiring.dispose()
+
+
+def run_due_jobs(settings: Settings | None = None) -> int:
+    """`python -m app run-due-jobs`: exit code 0, or 1 when a job failed."""
+    settings = settings or Settings()
+    logging.basicConfig(level=settings.log_level)
+    return asyncio.run(_run_cli(settings))
+
+
+def handler(event: object, context: object) -> dict[str, list[str]]:
+    """AWS Lambda entry point (the event and context are not used)."""
+    settings = Settings()
+    logging.getLogger().setLevel(settings.log_level)
+    return asyncio.run(_run_event(settings))

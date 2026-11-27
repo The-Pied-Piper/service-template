@@ -50,7 +50,11 @@ name = "Layers point inward"
 type = "layers"
 containers = ["app"]
 layers = [
-    "main",
+    # The command line, then the two composition roots (neither may import the other: the
+    # job runner must not load the web application), then the wiring both share.
+    "__main__",
+    "main | worker",
+    "wiring",
     "adapters",
     "application",
     "domain",
@@ -62,7 +66,7 @@ exhaustive_ignores = ["generated", "settings"]
 
 [[tool.importlinter.contracts]]
 id = "core-framework-free"
-name = "Domain and application know no framework, wire model or settings"
+name = "Domain and application know no framework, wire model, settings or event loop"
 type = "forbidden"
 source_modules = ["app.domain", "app.application"]
 forbidden_modules = [
@@ -77,6 +81,7 @@ forbidden_modules = [
     "fastapi",
     "jsonschema",
     "starlette",
+    "asyncio",
     "app.generated",
     "app.settings",
 ]
@@ -158,9 +163,9 @@ forbidden_modules = ["sqlalchemy", "asyncpg", "alembic", "app.settings"]
 
 [[tool.importlinter.contracts]]
 id = "main-wires-concretes-only"
-name = "Composition root imports concretes only: no port, domain module, DTO or validation library"
+name = "Composition roots import concretes only: no port, domain module, DTO or validation library"
 type = "forbidden"
-source_modules = ["app.main"]
+source_modules = ["app.main", "app.worker", "app.wiring"]
 forbidden_modules = [
     "pydantic",
     "pydantic_core",
@@ -170,3 +175,18 @@ forbidden_modules = [
 ]
 # Direct imports only: main reaches these through the adapters and services it wires.
 allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "worker-is-web-free"
+name = "The job runner loads no web framework, wire model or HTTP adapter, directly or indirectly"
+type = "forbidden"
+source_modules = ["app.worker"]
+forbidden_modules = [
+    "connexion",
+    "fastapi",
+    "starlette",
+    "uvicorn",
+    "app.generated",
+    "app.main",
+    "app.adapters.inbound.http_errors",
+]

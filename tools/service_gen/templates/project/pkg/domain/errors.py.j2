@@ -18,3 +18,11 @@ class ConflictError(DomainError):
 
 class ValidationError(DomainError):
     pass
+
+
+class InvalidScheduleError(ValidationError):
+    """A cron expression that cannot be read, or that never fires."""
+
+
+class DuplicateJobError(ConflictError):
+    """Two scheduled jobs were registered under the same name."""

@@ -1,0 +1,31 @@
+"""Create job_runs, the record of each scheduled job.
+
+Revision ID: 0001
+Revises:
+"""
+
+from __future__ import annotations
+
+import sqlalchemy as sa
+from alembic import op
+
+revision = "0001"
+down_revision: str | None = None
+branch_labels: None = None
+depends_on: None = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "job_runs",
+        sa.Column("name", sa.Text(), nullable=False),
+        sa.Column("last_started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_finished_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("running_since", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_error", sa.Text(), nullable=True),
+        sa.PrimaryKeyConstraint("name"),
+    )
+
+
+def downgrade() -> None:
+    op.drop_table("job_runs")

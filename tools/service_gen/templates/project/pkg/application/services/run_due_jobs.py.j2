@@ -1,0 +1,67 @@
+"""Runs the scheduled jobs that are due. Implements JobRunner.
+
+Something outside the service fires this (EventBridge, cron, a Kubernetes CronJob), every
+day or more often; the service itself decides what is due. Each job is read, checked against
+its schedule, claimed with one atomic write, run, and marked finished. A job that raises is
+recorded as failed and the others still run.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import timedelta
+
+from {{ package }}.application.ports.clock import Clock
+from {{ package }}.application.ports.job_runner import JobResult, JobStatus, RunReport
+from {{ package }}.application.ports.job_runs import JobRunStore
+from {{ package }}.application.services.job_registry import Job, JobRegistry
+from {{ package }}.domain.job_run import is_due
+
+logger = logging.getLogger(__name__)
+
+# Error text is kept for whoever looks at the job later; the cap stops one message bloating a row.
+_MAX_ERROR_LENGTH = 2000
+
+# A run that started this long ago and never finished is taken as crashed, so its lock is ignored.
+DEFAULT_STALE_AFTER = timedelta(hours=1)
+
+
+class RunDueJobs:
+    def __init__(
+        self,
+        registry: JobRegistry,
+        store: JobRunStore,
+        clock: Clock,
+        stale_after: timedelta = DEFAULT_STALE_AFTER,
+    ) -> None:
+        self._registry = registry
+        self._store = store
+        self._clock = clock
+        self._stale_after = stale_after
+
+    async def run_due_jobs(self) -> RunReport:
+        return RunReport(tuple([await self._run_one(job) for job in self._registry.jobs()]))
+
+    async def _run_one(self, job: Job) -> JobResult:
+        now = self._clock.now()
+        record = await self._store.get(job.name)
+        seen = record.last_started_at if record else None
+        if not is_due(job.schedule, seen, now):
+            return JobResult(job.name, JobStatus.NOT_DUE)
+        claimed = await self._store.claim(
+            job.name,
+            seen_last_started_at=seen,
+            now=now,
+            locked_since_before=now - self._stale_after,
+        )
+        if not claimed:
+            return JobResult(job.name, JobStatus.RUNNING_ELSEWHERE)
+
+        error: str | None = None
+        try:
+            await job.task()
+        except Exception as exc:  # one job failing must not stop the others
+            logger.exception("scheduled job %s failed", job.name)
+            error = f"{type(exc).__name__}: {exc}"[:_MAX_ERROR_LENGTH]
+        await self._store.finish(job.name, finished_at=self._clock.now(), error=error)
+        return JobResult(job.name, JobStatus.FAILED if error else JobStatus.RAN, error)

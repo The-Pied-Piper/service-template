@@ -1,0 +1,78 @@
+"""Postgres store for scheduled jobs: one row per job in `job_runs`. Implements JobRunStore."""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import DateTime, Text, or_, update
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import Mapped, mapped_column
+
+from {{ package }}.adapters.outbound.db.models import Base
+from {{ package }}.domain.job_run import JobRun
+
+
+class JobRunRow(Base):
+    __tablename__ = "job_runs"
+
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    running_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class SqlJobRunStore:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def get(self, name: str) -> JobRun | None:
+        async with self._session_factory() as session:
+            row = await session.get(JobRunRow, name)
+            if row is None:
+                return None
+            return JobRun(
+                name=row.name,
+                last_started_at=row.last_started_at,
+                last_finished_at=row.last_finished_at,
+                running_since=row.running_since,
+                last_error=row.last_error,
+            )
+
+    async def claim(
+        self,
+        name: str,
+        *,
+        seen_last_started_at: datetime | None,
+        now: datetime,
+        locked_since_before: datetime,
+    ) -> bool:
+        async with self._session_factory() as session, session.begin():
+            # The row must exist for the conditional update below to have something to win.
+            await session.execute(
+                insert(JobRunRow).values(name=name).on_conflict_do_nothing(index_elements=["name"])
+            )
+            # One statement: of two runners that read the same record, only one matches it.
+            claimed = await session.execute(
+                update(JobRunRow)
+                .where(
+                    JobRunRow.name == name,
+                    JobRunRow.last_started_at.is_not_distinct_from(seen_last_started_at),
+                    or_(
+                        JobRunRow.running_since.is_(None),
+                        JobRunRow.running_since < locked_since_before,
+                    ),
+                )
+                .values(last_started_at=now, running_since=now)
+                .returning(JobRunRow.name)
+            )
+            return claimed.first() is not None
+
+    async def finish(self, name: str, *, finished_at: datetime, error: str | None) -> None:
+        async with self._session_factory() as session, session.begin():
+            await session.execute(
+                update(JobRunRow)
+                .where(JobRunRow.name == name)
+                .values(running_since=None, last_finished_at=finished_at, last_error=error)
+            )

@@ -1,0 +1,21 @@
+"""AWS Lambda entry for the scheduled-jobs trigger (an EventBridge rule, for example).
+
+The event is not read: the trigger only says "now". When a job failed the invocation fails
+too, so Lambda's error metrics show it; the failed job is not retried until it is next due.
+"""
+
+from __future__ import annotations
+
+from {{ package }}.application.ports.job_runner import JobRunner
+
+
+class JobsFailedError(Exception):
+    """At least one scheduled job raised; the message names them."""
+
+
+async def run_due_jobs_event(runner: JobRunner) -> dict[str, list[str]]:
+    report = await runner.run_due_jobs()
+    if report.failed:
+        failed = [f"{r.name} ({r.error})" for r in report.results if r.error]
+        raise JobsFailedError("scheduled jobs failed: " + "; ".join(failed))
+    return {"results": [f"{r.name}: {r.status.value}" for r in report.results]}

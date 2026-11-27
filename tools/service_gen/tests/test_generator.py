@@ -64,7 +64,24 @@ def test_init_writes_expected_layout(project: Path) -> None:
         "app/application/ports/health.py",
         "app/adapters/outbound/db/health.py",
         "app/domain/errors.py",
+        "app/domain/schedule.py",
+        "app/domain/job_run.py",
+        "app/application/ports/job_runs.py",
+        "app/application/ports/job_runner.py",
+        "app/application/ports/clock.py",
+        "app/application/services/job_registry.py",
+        "app/application/services/run_due_jobs.py",
+        "app/adapters/outbound/db/job_runs.py",
+        "app/adapters/outbound/clock.py",
+        "app/adapters/inbound/jobs_cli.py",
+        "app/adapters/inbound/jobs_lambda.py",
+        "app/wiring.py",
+        "app/worker.py",
+        "app/__main__.py",
+        "migrations/versions/20261127_0000_0001_create_job_runs.py",
         "tests/test_app.py",
+        "tests/test_schedule.py",
+        "tests/test_jobs.py",
     ):
         assert (project / rel).exists(), rel
     assert "# widget-service" in (project / "README.md").read_text()
@@ -179,7 +196,7 @@ def test_full_request_flow(project: Path, monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(
         main_mod,
         "build_adapters",
-        lambda settings, engine: handlers.Adapters(
+        lambda settings, wiring: handlers.Adapters(
             status=status_adapter.StatusRequestAdapter(status_service.StatusService(probes)),
             widgets=PagingWidgetsAdapter(widgets_service),
         ),
@@ -289,6 +306,10 @@ SETTINGS_FORBIDDEN = (
     "app.domain.errors app.application.ports.health app.adapters.inbound.http_errors "
     "app.generated.models app.main"
 ).split()
+WORKER_FORBIDDEN = (
+    "connexion fastapi starlette uvicorn app.generated.handlers app.main "
+    "app.adapters.inbound.http_errors"
+).split()
 SERVICES = "app.application.services.status_service"
 
 PLANTED_VIOLATIONS = [
@@ -333,6 +354,24 @@ PLANTED_VIOLATIONS = [
         for m in INBOUND_FORBIDDEN
     ],
     *[("main-wires-concretes-only", "app/main.py", f"import {m}") for m in MAIN_FORBIDDEN],
+    # The two composition roots and the wiring they share.
+    *[("main-wires-concretes-only", "app/worker.py", f"import {m}") for m in MAIN_FORBIDDEN],
+    *[("main-wires-concretes-only", "app/wiring.py", f"import {m}") for m in MAIN_FORBIDDEN],
+    ("layers", "app/worker.py", "import app.main"),
+    ("layers", "app/main.py", "import app.worker"),
+    ("layers", "app/wiring.py", "import app.main"),
+    ("layers", "app/wiring.py", "import app.worker"),
+    ("layers", "app/main.py", "import app.__main__"),
+    ("layers", "app/worker.py", "import app.__main__"),
+    ("layers", "app/adapters/outbound/plant.py", "import app.wiring"),
+    ("layers", "app/adapters/inbound/plant.py", "import app.worker"),
+    # The job runner never loads the web stack, even through another module.
+    *[("worker-is-web-free", "app/worker.py", f"import {m}") for m in WORKER_FORBIDDEN],
+    ("worker-is-web-free", "app/wiring.py", "import connexion"),
+    # No event loop below the composition roots: the application and domain stay synchronous
+    # in what they import, and the adapters own the loop.
+    ("core-framework-free", "app/domain/plant.py", "import asyncio"),
+    ("core-framework-free", "app/application/services/plant.py", "import asyncio"),
 ]
 
 

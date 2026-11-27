@@ -1,0 +1,122 @@
+"""Cron schedules: parse a five-field expression and say when it fires next.
+
+The expression is the usual ``minute hour day-of-month month day-of-week``, read in UTC:
+``*``, lists (``1,15``), ranges (``9-17``) and steps (``*/10``, ``0-30/5``) are supported,
+numbers only. Day of week is 0-6 with 0 as Sunday; 7 also means Sunday. As in classic cron,
+when both day fields are restricted a day matches if either one does.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+
+from {{ package }}.domain.errors import InvalidScheduleError
+
+_FIELDS = (
+    ("minute", 0, 59),
+    ("hour", 0, 23),
+    ("day of month", 1, 31),
+    ("month", 1, 12),
+    ("day of week", 0, 7),
+)
+
+# Long enough to reach the next 29 February from any date, across a skipped leap year.
+_SEARCH_DAYS = 366 * 8
+
+_EPOCH = datetime(2000, 1, 1, tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class Schedule:
+    expression: str
+    minutes: frozenset[int]
+    hours: frozenset[int]
+    days_of_month: frozenset[int]
+    months: frozenset[int]
+    days_of_week: frozenset[int]  # 0-6, Sunday is 0
+    day_of_month_restricted: bool
+    day_of_week_restricted: bool
+
+    @classmethod
+    def parse(cls, expression: str) -> Schedule:
+        parts = expression.split()
+        if len(parts) != len(_FIELDS):
+            raise InvalidScheduleError(
+                f"{expression!r}: expected 5 fields (minute hour day-of-month month day-of-week)"
+            )
+        minutes, hours, days, months, weekdays = (
+            _parse_field(text, name, low, high)
+            for text, (name, low, high) in zip(parts, _FIELDS, strict=True)
+        )
+        schedule = cls(
+            expression=" ".join(parts),
+            minutes=minutes,
+            hours=hours,
+            days_of_month=days,
+            months=months,
+            days_of_week=frozenset(day % 7 for day in weekdays),
+            day_of_month_restricted=not parts[2].startswith("*"),
+            day_of_week_restricted=not parts[4].startswith("*"),
+        )
+        try:
+            schedule.next_after(_EPOCH)
+        except InvalidScheduleError as exc:
+            raise InvalidScheduleError(f"{expression!r}: never fires") from exc
+        return schedule
+
+    def next_after(self, moment: datetime) -> datetime:
+        """The first minute strictly after `moment` that the schedule fires, in UTC."""
+        if moment.tzinfo is None:
+            raise ValueError("moment must be timezone-aware")
+        candidate = moment.astimezone(UTC).replace(second=0, microsecond=0) + timedelta(minutes=1)
+        limit = candidate + timedelta(days=_SEARCH_DAYS)
+        while candidate <= limit:
+            if candidate.month not in self.months:
+                candidate = _first_of_next_month(candidate)
+            elif not self._day_matches(candidate):
+                candidate = (candidate + timedelta(days=1)).replace(hour=0, minute=0)
+            elif candidate.hour not in self.hours:
+                candidate = (candidate + timedelta(hours=1)).replace(minute=0)
+            elif candidate.minute not in self.minutes:
+                candidate += timedelta(minutes=1)
+            else:
+                return candidate
+        raise InvalidScheduleError(f"{self.expression!r}: never fires")
+
+    def _day_matches(self, moment: datetime) -> bool:
+        in_month = moment.day in self.days_of_month
+        in_week = moment.isoweekday() % 7 in self.days_of_week
+        if self.day_of_month_restricted and self.day_of_week_restricted:
+            return in_month or in_week
+        return in_month and in_week
+
+
+def _first_of_next_month(moment: datetime) -> datetime:
+    year, month = (moment.year + 1, 1) if moment.month == 12 else (moment.year, moment.month + 1)
+    return moment.replace(year=year, month=month, day=1, hour=0, minute=0)
+
+
+def _parse_field(text: str, name: str, low: int, high: int) -> frozenset[int]:
+    values: set[int] = set()
+    for part in text.split(","):
+        base, slash, step_text = part.partition("/")
+        step = _number(step_text, name, text) if slash else 1
+        if step < 1:
+            raise InvalidScheduleError(f"{name} {text!r}: the step must be at least 1")
+        if base == "*":
+            start, stop = low, high
+        else:
+            first, dash, last = base.partition("-")
+            start = _number(first, name, text)
+            stop = _number(last, name, text) if dash else (high if slash else start)
+        if not low <= start <= stop <= high:
+            raise InvalidScheduleError(f"{name} {text!r}: must be within {low}-{high}")
+        values.update(range(start, stop + 1, step))
+    return frozenset(values)
+
+
+def _number(text: str, name: str, whole: str) -> int:
+    if not text.isascii() or not text.isdigit():
+        raise InvalidScheduleError(f"{name} {whole!r}: {text!r} is not a number")
+    return int(text)

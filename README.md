@@ -147,10 +147,65 @@ new tag appeared it tells you to wire the adapter into `app/main.py`.
 | --- | --- | --- | --- |
 | `app/generated/**` | generator | overwritten | overwritten (via sync) |
 | `app/adapters/inbound/*_adapter.py`, `app/application/ports/*_port.py`, `app/application/services/*_service.py` | you (scaffolded once) | created if missing | untouched |
-| `app/main.py`, `app/settings.py`, `app/adapters/inbound/http_errors.py`, `app/domain/**`, `app/adapters/outbound/**`, `tests/**`, `README.md` | you (written by `init`) | untouched | untouched |
+| `app/main.py`, `app/worker.py`, `app/wiring.py`, `app/__main__.py`, `app/settings.py`, `app/adapters/inbound/http_errors.py`, `app/adapters/inbound/jobs_*.py`, `app/domain/**`, `app/adapters/outbound/**`, `app/application/ports/{clock,health,job_runner,job_runs}.py`, `app/application/services/{job_registry,run_due_jobs}.py`, `tests/**`, `README.md` | you (written by `init`) | untouched | untouched |
 | `Dockerfile`, `compose.yaml`, the root `requirements*.in` and `requirements*.txt`, `pyproject.toml`, `alembic.ini`, `migrations/` | you (shipped plain) | untouched | untouched |
 | `dev.sh`, `scripts/`, `tools/service_gen/`, `.github/workflows/ci.yml` | template | untouched | **replaced** |
 | `service_scripts/` (the service's own `./dev.sh` commands) | you (shipped with a README) | untouched | untouched |
+
+## Scheduled jobs
+
+A service can run work on a schedule (a nightly purge, a monthly report) without a scheduler
+of its own, and without being tied to any one cloud. It works like Django's cron
+apps: the service keeps a list of jobs, each with a cron schedule, and one command, **run due
+jobs**, runs whatever is due. Something outside the service fires that command on a clock
+(EventBridge, `cron`, a Kubernetes CronJob). Nothing is scheduled inside the process.
+
+```sh
+./dev.sh run-due-jobs              # the same as: python -m app run-due-jobs
+python -m app serve                # the HTTP server (the image's default command)
+```
+
+**Register a job** in `register_jobs` in `app/wiring.py`. A job is an async function with no
+arguments, built from the same repositories the endpoints use. The template ships none.
+
+```python
+registry.register("purge-old-messages", "0 0 * * *", purge_service.run)
+```
+
+The schedule is five-field cron in UTC: `*`, lists, ranges and steps, numbers only; day of week
+is 0-6 with 0 as Sunday. A bad schedule or a duplicate name raises when the service starts,
+not at midnight.
+
+**What happens on each run.** For every job: read its row in `job_runs`; it is due when it
+never ran, or when its schedule has fired since it last started, so a tick that was missed is
+picked up by the next one. A due job is claimed with one atomic database write (it succeeds
+only if nobody else started the job since the row was read), run, and marked finished with
+its error text if it raised. Two overlapping ticks never run a job twice. A run that has been
+going for more than an hour is taken as crashed and its lock is ignored. One job failing never
+stops the others; the command exits 1 if any failed. A failed job is not retried until its next
+scheduled time.
+
+Trigger the command at least as often as your finest schedule. Once a day at midnight UTC is
+enough for daily and slower jobs.
+
+**Layout.** The "is it due" rule and cron parsing are in the domain (`schedule.py`,
+`job_run.py`). The application has the registry and the `RunDueJobs` service, which talks only to
+ports (`JobRunStore`, `Clock`). Postgres and the system clock are outbound adapters. The
+`run-due-jobs` command and the Lambda handler are inbound adapters that call the `JobRunner` port.
+There are two composition roots, `app/main.py` (HTTP server) and `app/worker.py` (job runner),
+and both take their engine, clock and repositories from the shared `app/wiring.py`. Put a
+repository that a job and an endpoint both use on `Wiring`.
+
+**Images.** The `prod` target is the HTTP server. The `jobs` target runs `python -m app
+run-due-jobs`, for a CronJob or a scheduled container task. The `jobs-lambda` target is the same
+as an AWS Lambda container image (handler `app.worker.handler`, via the Runtime Interface
+Client). Both are built from the stage before `prod`, so a Lambda Web Adapter you add to `prod`
+is not in them. That matters because the adapter waits for a web server on its port before it
+serves anything, so a job invocation cannot share the web image. A handler failure means a job
+raised, so Lambda's error metric shows it. Use the same database settings as the web service, and
+set the async retry attempts to 0 (a retry finds nothing due).
+
+An existing service adopts this by hand: see "Unreleased" in `CHANGELOG.md`.
 
 ## Known limits
 
@@ -233,11 +288,13 @@ same image and command as locally — and builds the production image once
 The layer rules are `[tool.importlinter]` contracts in `pyproject.toml`, which the
 service owns: add contracts as it grows.
 
-- Layers point inward: `app.main`, `app.adapters`, `app.application`, `app.domain`.
+- Layers point inward: `app.__main__`, then the two composition roots `app.main` and
+  `app.worker` (which never import each other), then `app.wiring` (what both share),
+  `app.adapters`, `app.application`, `app.domain`.
   Any other module under `app/` must be added to the layers (`app.generated` and
   `app.settings` are exempt), so a new module cannot slip in unchecked.
 - The domain and application import none of Connexion, FastAPI, Starlette, httpx,
-  jsonschema, Pydantic, SQLAlchemy, asyncpg, Alembic, `app.generated` or
+  jsonschema, Pydantic, SQLAlchemy, asyncpg, Alembic, `asyncio`, `app.generated` or
   `app.settings`.
 - Outbound adapters import none of Connexion, FastAPI, Starlette, jsonschema, Pydantic
   or `app.generated`, directly. An outbound HTTP client (httpx) is allowed there.
@@ -252,10 +309,13 @@ service owns: add contracts as it grows.
   the inbound adapter they call (indirect imports are allowed).
 - Inbound adapters touch no database library (SQLAlchemy, asyncpg, Alembic) and no settings.
 - `app.settings` imports nothing else from the app.
-- `app.main` is the composition root. It directly imports concretes only: no ports, domain
+- `app.main`, `app.worker` and `app.wiring` are the composition roots and their shared factory.
+  They directly import concretes only: no ports, domain
   modules, generated models, Pydantic or `pydantic_core` (pass a longer list of probes
   inline or as a tuple: annotating it with the port type is not allowed). Translating errors
   into responses belongs to the inbound adapter `http_errors.py`.
+- `app.worker` loads no web framework, `app.generated` or `app.main`, even through another
+  module, so the job runner stays small and never builds the web application.
 
 A folder without an `__init__.py` is invisible to import-linter, so ruff's `INP001`
 fails the lint step for one under `app/`. Every contract has a planted-violation test
@@ -293,7 +353,7 @@ repository.
 
 ```
 openapi/openapi.yml      example contract; a service replaces this
-Dockerfile               dev target (tooling, git, ssh, gh, psql, bind mount) and prod target (slim)
+Dockerfile               dev target (tooling, git, ssh, gh, psql, bind mount), prod (slim), and the job runner targets jobs and jobs-lambda
 compose.yaml             app + postgres:16 (.env.example lists the knobs)
 requirements*.txt        pinned versions: runtime, tooling, and tools/service_gen/ (generator); compiled with uv (see the header of requirements.txt)
 requirements*.in         the loose lists those are compiled from

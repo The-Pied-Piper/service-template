@@ -1,0 +1,37 @@
+"""The list of scheduled jobs: a name, a cron schedule and the function to run.
+
+`wiring.py` fills it (`register_jobs`); the template ships no jobs.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+
+from {{ package }}.domain.errors import DuplicateJobError
+from {{ package }}.domain.schedule import Schedule
+
+Task = Callable[[], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class Job:
+    name: str
+    schedule: Schedule
+    task: Task
+
+
+class JobRegistry:
+    def __init__(self) -> None:
+        self._jobs: dict[str, Job] = {}
+
+    def register(self, name: str, schedule: str, task: Task) -> None:
+        """Add a job. `schedule` is a five-field cron expression in UTC, for example
+        ``"0 0 * * *"`` for midnight every day. Raises if the name is taken or the schedule
+        cannot be read, so a mistake fails at start-up rather than at midnight."""
+        if name in self._jobs:
+            raise DuplicateJobError(f"a job named {name!r} is already registered")
+        self._jobs[name] = Job(name, Schedule.parse(schedule), task)
+
+    def jobs(self) -> tuple[Job, ...]:
+        return tuple(self._jobs.values())

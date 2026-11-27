@@ -2,6 +2,14 @@
 
 from {{ package }}.adapters.outbound.db.engine import create_engine, create_session_factory
 from {{ package }}.adapters.outbound.db.health import DatabaseProbe
+from {{ package }}.adapters.outbound.db.job_runs import JobRunRow, SqlJobRunStore
 from {{ package }}.adapters.outbound.db.models import Base
 
-__all__ = ["Base", "DatabaseProbe", "create_engine", "create_session_factory"]
+__all__ = [
+    "Base",
+    "DatabaseProbe",
+    "JobRunRow",
+    "SqlJobRunStore",
+    "create_engine",
+    "create_session_factory",
+]
