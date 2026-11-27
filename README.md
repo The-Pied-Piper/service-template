@@ -182,6 +182,7 @@ class PurgeJobsAdapter:
     async def _purge(self) -> None:
         await self._service.purge_old()
 
+
 # in register_jobs(registry, wiring):
 for job in PurgeJobsAdapter(wiring.purge_service).jobs():
     registry.register(job)
