@@ -2,10 +2,13 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 import pytest
 
+from {{ package }}.adapters.inbound.cron import parse_cron
 from {{ package }}.application.ports.job_runner import JobStatus
+from {{ package }}.application.ports.jobs import Job
 from {{ package }}.application.services.job_registry import JobRegistry
 from {{ package }}.application.services.run_due_jobs import RunDueJobs
 from {{ package }}.domain.errors import DuplicateJobError, InvalidScheduleError
@@ -69,7 +72,7 @@ class Counter:
 def build(*jobs: tuple[str, str, Counter]) -> tuple[RunDueJobs, FakeStore, FakeClock]:
     registry = JobRegistry()
     for name, schedule, task in jobs:
-        registry.register(name, schedule, task)
+        registry.register(Job(name, parse_cron(schedule), task))
     store, clock = FakeStore(), FakeClock(MIDNIGHT)
     return RunDueJobs(registry, store, clock), store, clock
 
@@ -133,8 +136,8 @@ async def test_a_failing_job_is_recorded_and_the_others_still_run() -> None:
         raise RuntimeError("disk is full")
 
     registry = JobRegistry()
-    registry.register("broken", "0 0 * * *", broken)
-    registry.register("after", "0 0 * * *", after)
+    registry.register(Job("broken", parse_cron("0 0 * * *"), broken))
+    registry.register(Job("after", parse_cron("0 0 * * *"), after))
     store = FakeStore()
     runner = RunDueJobs(registry, store, FakeClock(MIDNIGHT))
 
@@ -160,8 +163,8 @@ async def test_a_store_failure_when_finishing_does_not_stop_the_other_jobs() -> 
 
     after = Counter()
     registry = JobRegistry()
-    registry.register("first", "0 0 * * *", Counter())
-    registry.register("second", "0 0 * * *", after)
+    registry.register(Job("first", parse_cron("0 0 * * *"), Counter()))
+    registry.register(Job("second", parse_cron("0 0 * * *"), after))
     runner = RunDueJobs(registry, FinishFails(), FakeClock(MIDNIGHT))
 
     report = await runner.run_due_jobs()
@@ -179,7 +182,7 @@ async def test_a_failed_job_waits_for_its_next_scheduled_time() -> None:
         raise RuntimeError("no")
 
     registry = JobRegistry()
-    registry.register("broken", "0 0 * * *", broken)
+    registry.register(Job("broken", parse_cron("0 0 * * *"), broken))
     clock = FakeClock(MIDNIGHT)
     runner = RunDueJobs(registry, FakeStore(), clock)
     await runner.run_due_jobs()
@@ -195,7 +198,7 @@ async def test_long_error_text_is_cut() -> None:
         raise RuntimeError("x" * 10_000)
 
     registry = JobRegistry()
-    registry.register("broken", "0 0 * * *", broken)
+    registry.register(Job("broken", parse_cron("0 0 * * *"), broken))
     runner = RunDueJobs(registry, FakeStore(), FakeClock(MIDNIGHT))
 
     report = await runner.run_due_jobs()
@@ -233,7 +236,7 @@ async def test_two_runners_over_one_store_run_the_job_once() -> None:
     task = Counter()
     store, clock = FakeStore(), FakeClock(MIDNIGHT)
     registry = JobRegistry()
-    registry.register("purge", "0 0 * * *", task)
+    registry.register(Job("purge", parse_cron("0 0 * * *"), task))
     first, second = RunDueJobs(registry, store, clock), RunDueJobs(registry, store, clock)
 
     await asyncio.gather(first.run_due_jobs(), second.run_due_jobs())
@@ -250,16 +253,56 @@ async def test_no_jobs_is_an_empty_report() -> None:
 def test_the_services_registered_jobs_have_valid_schedules_and_unique_names() -> None:
     """Needs no database: building the job list must not fail."""
     from {{ package }}.settings import Settings
-    from {{ package }}.wiring import build_wiring, register_jobs
+    from {{ package }}.wiring import build_wiring
+    from {{ package }}.worker import register_jobs
 
     register_jobs(JobRegistry(), build_wiring(Settings()))
 
 
-def test_registering_checks_the_name_and_the_schedule() -> None:
+def test_registering_refuses_a_duplicate_name() -> None:
     registry = JobRegistry()
-    registry.register("purge", "0 0 * * *", Counter())
+    registry.register(Job("purge", parse_cron("0 0 * * *"), Counter()))
     with pytest.raises(DuplicateJobError):
-        registry.register("purge", "0 1 * * *", Counter())
-    with pytest.raises(InvalidScheduleError):
-        registry.register("bad", "every day", Counter())
+        registry.register(Job("purge", parse_cron("0 1 * * *"), Counter()))
     assert [job.name for job in registry.jobs()] == ["purge"]
+
+
+def test_a_bad_cron_expression_fails_when_the_job_adapter_declares_it() -> None:
+    with pytest.raises(InvalidScheduleError):
+        parse_cron("every day")
+
+
+class PurgePort(Protocol):
+    async def purge_old(self) -> None: ...
+
+
+class PurgeJobsAdapter:
+    """The shape of a job adapter: an inbound adapter that declares jobs and calls a port."""
+
+    def __init__(self, service: PurgePort) -> None:
+        self._service = service
+
+    def jobs(self) -> tuple[Job, ...]:
+        return (Job("purge-old-messages", parse_cron("0 0 * * *"), self._purge),)
+
+    async def _purge(self) -> None:
+        await self._service.purge_old()
+
+
+async def test_a_job_adapter_runs_its_service_through_the_registry() -> None:
+    class PurgeService:
+        purged = 0
+
+        async def purge_old(self) -> None:
+            self.purged += 1
+
+    service = PurgeService()
+    registry = JobRegistry()
+    for job in PurgeJobsAdapter(service).jobs():
+        registry.register(job)
+    runner = RunDueJobs(registry, FakeStore(), FakeClock(MIDNIGHT))
+
+    report = await runner.run_due_jobs()
+
+    assert [(r.name, r.status) for r in report.results] == [("purge-old-messages", JobStatus.RAN)]
+    assert service.purged == 1

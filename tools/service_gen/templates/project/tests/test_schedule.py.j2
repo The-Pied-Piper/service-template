@@ -1,12 +1,13 @@
-"""Cron schedules and the "is due" rule: pure, no clock, no database."""
+"""Cron expressions (the inbound adapter) and the schedule and "is due" rules (the domain):
+no clock, no database."""
 
 from datetime import UTC, datetime
 
 import pytest
 
+from {{ package }}.adapters.inbound.cron import parse_cron
 from {{ package }}.domain.errors import InvalidScheduleError
 from {{ package }}.domain.job_run import is_due
-from {{ package }}.domain.schedule import Schedule
 
 
 def at(text: str) -> datetime:
@@ -32,12 +33,12 @@ def at(text: str) -> datetime:
     ],
 )
 def test_next_after(expression: str, after: str, expected: str) -> None:
-    assert Schedule.parse(expression).next_after(at(after)) == at(expected)
+    assert parse_cron(expression).next_after(at(after)) == at(expected)
 
 
 def test_day_of_month_or_day_of_week_when_both_are_restricted() -> None:
     # 13th of the month or any Friday. 2026-11-13 is a Friday; 2026-11-20 is the next one.
-    schedule = Schedule.parse("0 0 13 * 5")
+    schedule = parse_cron("0 0 13 * 5")
     assert schedule.next_after(at("2026-11-01T00:00:00")) == at("2026-11-06T00:00:00")
     assert schedule.next_after(at("2026-11-13T00:00:00")) == at("2026-11-20T00:00:00")
     assert schedule.next_after(at("2026-11-28T00:00:00")) == at("2026-12-04T00:00:00")
@@ -48,12 +49,12 @@ def test_other_time_zones_are_read_as_utc() -> None:
 
     eastern = timezone(timedelta(hours=-5))
     moment = datetime(2026, 11, 27, 20, 0, tzinfo=eastern)  # 01:00 UTC on the 28th
-    assert Schedule.parse("0 0 * * *").next_after(moment) == at("2026-11-29T00:00:00")
+    assert parse_cron("0 0 * * *").next_after(moment) == at("2026-11-29T00:00:00")
 
 
 def test_a_naive_moment_is_refused() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
-        Schedule.parse("0 0 * * *").next_after(datetime(2026, 11, 27))
+        parse_cron("0 0 * * *").next_after(datetime(2026, 11, 27))
 
 
 @pytest.mark.parametrize(
@@ -79,20 +80,20 @@ def test_a_naive_moment_is_refused() -> None:
 )
 def test_bad_expressions_are_refused(expression: str) -> None:
     with pytest.raises(InvalidScheduleError):
-        Schedule.parse(expression)
+        parse_cron(expression)
 
 
 def test_a_job_that_never_ran_is_due() -> None:
-    assert is_due(Schedule.parse("0 0 * * *"), None, at("2026-11-27T12:00:00"))
+    assert is_due(parse_cron("0 0 * * *"), None, at("2026-11-27T12:00:00"))
 
 
 def test_due_once_the_schedule_has_fired_since_the_last_start() -> None:
-    schedule = Schedule.parse("0 0 * * *")
+    schedule = parse_cron("0 0 * * *")
     started = at("2026-11-27T00:00:07")
     assert not is_due(schedule, started, at("2026-11-27T23:59:59"))
     assert is_due(schedule, started, at("2026-11-28T00:00:00"))
 
 
 def test_a_missed_tick_is_picked_up_by_the_next_one() -> None:
-    schedule = Schedule.parse("0 0 * * *")
+    schedule = parse_cron("0 0 * * *")
     assert is_due(schedule, at("2026-11-24T00:00:05"), at("2026-11-27T00:00:03"))

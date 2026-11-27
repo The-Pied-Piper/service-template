@@ -1,0 +1,70 @@
+"""Cron expressions: translates the text a job is declared with into a domain `Schedule`.
+
+The expression is the usual ``minute hour day-of-month month day-of-week``, read in UTC:
+``*``, lists (``1,15``), ranges (``9-17``) and steps (``*/10``, ``0-30/5``) are supported,
+numbers only. Day of week is 0-6 with 0 as Sunday; 7 also means Sunday. A job adapter calls
+`parse_cron` for the schedule of each job it declares, like a request adapter turning a DTO
+into a domain object.
+"""
+
+from __future__ import annotations
+
+from {{ package }}.domain.errors import InvalidScheduleError
+from {{ package }}.domain.schedule import Schedule
+
+_FIELDS = (
+    ("minute", 0, 59),
+    ("hour", 0, 23),
+    ("day of month", 1, 31),
+    ("month", 1, 12),
+    ("day of week", 0, 7),
+)
+
+
+def parse_cron(expression: str) -> Schedule:
+    parts = expression.split()
+    if len(parts) != len(_FIELDS):
+        raise InvalidScheduleError(
+            f"{expression!r}: expected 5 fields (minute hour day-of-month month day-of-week)"
+        )
+    minutes, hours, days, months, weekdays = (
+        _parse_field(text, name, low, high)
+        for text, (name, low, high) in zip(parts, _FIELDS, strict=True)
+    )
+    try:
+        return Schedule(
+            minutes=minutes,
+            hours=hours,
+            days_of_month=days,
+            months=months,
+            days_of_week=frozenset(day % 7 for day in weekdays),
+            day_of_month_restricted=not parts[2].startswith("*"),
+            day_of_week_restricted=not parts[4].startswith("*"),
+        )
+    except InvalidScheduleError as exc:
+        raise InvalidScheduleError(f"{expression!r}: never fires") from exc
+
+
+def _parse_field(text: str, name: str, low: int, high: int) -> frozenset[int]:
+    values: set[int] = set()
+    for part in text.split(","):
+        base, slash, step_text = part.partition("/")
+        step = _number(step_text, name, text) if slash else 1
+        if step < 1:
+            raise InvalidScheduleError(f"{name} {text!r}: the step must be at least 1")
+        if base == "*":
+            start, stop = low, high
+        else:
+            first, dash, last = base.partition("-")
+            start = _number(first, name, text)
+            stop = _number(last, name, text) if dash else (high if slash else start)
+        if not low <= start <= stop <= high:
+            raise InvalidScheduleError(f"{name} {text!r}: must be within {low}-{high}")
+        values.update(range(start, stop + 1, step))
+    return frozenset(values)
+
+
+def _number(text: str, name: str, whole: str) -> int:
+    if not text.isascii() or not text.isdigit() or len(text) > 4:
+        raise InvalidScheduleError(f"{name} {whole!r}: {text!r} is not a number")
+    return int(text)

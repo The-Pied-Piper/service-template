@@ -14,7 +14,8 @@ from datetime import timedelta
 from {{ package }}.application.ports.clock import Clock
 from {{ package }}.application.ports.job_runner import JobResult, JobStatus, RunReport
 from {{ package }}.application.ports.job_runs import JobRunStore
-from {{ package }}.application.services.job_registry import Job, JobRegistry
+from {{ package }}.application.ports.jobs import Job
+from {{ package }}.application.services.job_registry import JobRegistry
 from {{ package }}.domain.job_run import is_due
 
 logger = logging.getLogger(__name__)

@@ -73,6 +73,8 @@ def test_init_writes_expected_layout(project: Path) -> None:
         "app/application/services/run_due_jobs.py",
         "app/adapters/outbound/db/job_runs.py",
         "app/adapters/outbound/clock.py",
+        "app/adapters/inbound/cron.py",
+        "app/application/ports/jobs.py",
         "app/adapters/inbound/jobs_cli.py",
         "app/adapters/inbound/jobs_lambda.py",
         "app/wiring.py",

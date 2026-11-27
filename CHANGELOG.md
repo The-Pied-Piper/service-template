@@ -5,7 +5,7 @@ is listed under "Manual steps".
 
 ## Unreleased
 
-- Scheduled jobs: a registry of `(name, cron schedule, function)`, a `run-due-jobs` command that
+- Scheduled jobs: job adapters (inbound, like request adapters) declare `(name, cron schedule, function)`; a registry, a `run-due-jobs` command that
   runs what is due and records each run in a `job_runs` table, and a Lambda handler for the same.
   The trigger is left to infrastructure. See "Scheduled jobs" in the README.
 - `python -m app serve | run-due-jobs`; `./dev.sh run-due-jobs`.

@@ -1,9 +1,9 @@
 """Shared wiring: what the HTTP server (`main.py`) and the job runner (`worker.py`) both build.
 
 There are two composition roots, one for each way the service is started, and both take their
-database engine, clock, repositories and job list from here, so a job and an endpoint use the
-same repository code. Like `main.py`, this module imports concretes only; put a repository
-that both need on `Wiring`, and register the service's jobs in `register_jobs`.
+database engine, clock and repositories from here, so a job and an endpoint use the same
+repository code. Like `main.py`, this module imports concretes only; put a repository or service
+that both a request and a job need on `Wiring`.
 """
 
 from __future__ import annotations
@@ -38,18 +38,5 @@ def build_wiring(settings: Settings) -> Wiring:
     )
 
 
-def register_jobs(registry: JobRegistry, wiring: Wiring) -> None:
-    """Register this service's scheduled jobs. The template ships none.
-
-    A job is an async function with no arguments; build it from the same repositories the
-    endpoints use. The schedule is a five-field cron expression in UTC, and a job runs when
-    something fires `python -m app run-due-jobs` after its schedule has come due:
-
-        registry.register("purge-old-messages", "0 0 * * *", purge_service.run)
-    """
-
-
-def build_job_runner(wiring: Wiring) -> RunDueJobs:
-    registry = JobRegistry()
-    register_jobs(registry, wiring)
+def build_job_runner(wiring: Wiring, registry: JobRegistry) -> RunDueJobs:
     return RunDueJobs(registry, SqlJobRunStore(wiring.session_factory), wiring.clock)
